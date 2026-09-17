@@ -1,0 +1,495 @@
+import asyncio
+import logging
+import sqlite3
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, CallbackQuery
+from aiogram.enums import ParseMode
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram.enums import ParseMode
+from aiohttp import web
+
+# --- НАСТРОЙКИ ---
+BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
+CHANNEL_ID = -1004330638807  # ID канала с -100
+ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
+PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+router = Router()
+scheduler = AsyncIOScheduler() 
+
+# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ ---
+subjects_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text='Проектный семинар "Биоинформатика в агробиотехнологиях"')],
+        [KeyboardButton(text='Биостатистика')],
+        [KeyboardButton(text='Молекулярная эволюция')],
+        [KeyboardButton(text='Генетические основы селекционного процесса в растениеводстве и животноводстве')]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+# --- КЛАВИАТУРА ДЛЯ ВАЖНЫХ УВЕДОМЛЕНИЙ ---
+pin_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text='📌 Да, закрепить в канале')],
+        [KeyboardButton(text='❌ Нет, просто опубликовать')]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+# --- БАЗА ДАННЫХ ---
+conn = sqlite3.connect("deadlines.db")
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject TEXT,
+        description TEXT,
+        deadline TEXT,
+        submit_url TEXT,
+        file_id TEXT,
+        notified INTEGER DEFAULT 0,
+        message_id INTEGER DEFAULT 0
+    )
+''')
+conn.commit()
+
+# --- СОСТОЯНИЯ ДЛЯ ПОШАГОВОГО ОПРОСА ---
+class Form(StatesGroup):
+    subject = State()
+    description = State()
+    deadline = State()
+    submit_url = State()
+    file = State()
+
+class EditForm(StatesGroup):    # <-- Вот этот класс обязательно должен быть здесь!
+    task_id = State()
+    choice = State()
+    new_value = State()
+
+class NoticeForm(StatesGroup):
+    text = State()
+    pin = State()
+
+
+# Вспомогательная функция для безопасного текста в HTML
+def clean_html(text):
+    return str(text).replace("<", "&lt;").replace(">", "&gt;")
+# --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ---
+async def clear_old_deadlines():
+    # Находим задачи, у которых дедлайн наступил более 14 дней назад
+    two_weeks_ago = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
+    
+    cursor.execute("SELECT id, message_id FROM tasks WHERE deadline < ?", (two_weeks_ago,))
+    old_tasks = cursor.fetchall()
+    
+    for task in old_tasks:
+        task_id, msg_id = task
+        # Удаляем оригинальный пост из ленты канала
+        if msg_id and msg_id != 0:
+            try:
+                await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+            except Exception as e:
+                logging.error(f"Не удалось автоматически удалить старый пост {msg_id}: {e}")
+                
+        # Стираем запись из локальной базы данных
+        cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        
+    if old_tasks:
+        conn.commit()
+        logging.info(f"Автоочистка: удалено просроченных заданий: {len(old_tasks)}")
+        await update_pinned_post()
+# --- ДИАЛОГ ДЛЯ ВАЖНЫХ ОБЪЯВЛЕНИЙ ---
+@router.message(Command("alert"), F.from_user.id == ADMIN_ID)
+async def start_notice(message: Message, state: FSMContext):
+    await message.answer("📢 Введи текст важного объявления (можно использовать абзацы):")
+    await state.set_state(NoticeForm.text)
+
+@router.message(NoticeForm.text)
+async def process_notice_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await message.answer("Хочешь закрепить это сообщение в ленте канала?", reply_markup=pin_keyboard)
+    await state.set_state(NoticeForm.pin)
+
+@router.message(NoticeForm.pin)
+async def process_notice_pin(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    notice_text = clean_html(user_data['text'])
+    
+    # Красивый шаблон для важного объявления
+    full_text = (
+        f"🚨 <b>Важное объявление</b> #инфо\n"
+        f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+        f"{notice_text}\n"
+        f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+        f"👥 @everyone | Просьба ознакомиться!"
+    )
+    
+    try:
+        # Публикуем в канал
+        msg = await bot.send_message(chat_id=CHANNEL_ID, text=full_text, parse_mode=ParseMode.HTML)
+        
+        # Если староста выбрал "Закрепить"
+        if "Да, закрепить" in message.text:
+            await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=msg.message_id)
+            await message.answer("📢 Объявление опубликовано и закреплено!", reply_markup=ReplyKeyboardRemove())
+        else:
+            await message.answer("📢 Объявление успешно опубликовано!", reply_markup=ReplyKeyboardRemove())
+            
+    except Exception as e:
+        logging.error(f"Ошибка отправки объявления: {e}")
+        await message.answer("❌ Произошла ошибка при отправке сообщения в канал.", reply_markup=ReplyKeyboardRemove())
+        
+    await state.clear()
+#пароль 3-430dsQ
+# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА ---
+async def update_pinned_post():
+    cursor.execute("SELECT subject, description, deadline, submit_url FROM tasks ORDER BY deadline ASC")
+    all_tasks = cursor.fetchall()
+    
+    text = "📌 <b>Актуальные дедлайны)</b> 📌\n\n"
+    if not all_tasks:
+        text += "Ура! Активных заданий нет 🎉"
+    else:
+        now = datetime.now()
+        for task in all_tasks:
+            try:
+                task_deadline = datetime.strptime(task[2], "%Y-%m-%d %H:%M")
+                dt = task_deadline.strftime("%d.%m.%Y %H:%M")
+                is_expired = task_deadline < now
+                
+                subj = clean_html(task[0])
+                desc = clean_html(task[1])
+                url = task[3]
+                
+                if is_expired:
+                    # Если дедлайн прошел — зачеркиваем тегом <s>
+                    if str(url).startswith("http"):
+                        text += f"❌ <s><b>Предмет:</b> {subj}\n<b>Что сделать:</b> {desc}\n<b>Сдать до:</b> {dt}\n<b>Сдача:</b> <a href='{url}'>Ссылка</a></s>\n"
+                    else:
+                        text += f"❌ <s><b>Предмет:</b> {subj}\n<b>Что сделать:</b> {desc}\n<b>Сдать до:</b> {dt}\n<b>Сдача:</b> {clean_html(url)}</s>\n"
+                else:
+                    # Если актуально — выводим красиво жирным
+                    if str(url).startswith("http"):
+                        text += f"📘 <b>Предмет:</b> {subj}\n📝 <b>Что сделать:</b> {desc}\n⏰ <b>Сдать до:</b> <code>{dt}</code>\n📥 <b>Сдача:</b> <a href='{url}'>Ссылка</a>\n"
+                    else:
+                        text += f"📘 <b>Предмет:</b> {subj}\n📝 <b>Что сделать:</b> {desc}\n⏰ <b>Сдать до:</b> <code>{dt}</code>\n📥 <b>Сдача:</b> {clean_html(url)}\n"
+                text += "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+            except Exception as e:
+                logging.error(f"Ошибка парсинга задачи в закрепе: {e}")
+            
+    try:
+        await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        logging.error(f"Ошибка обновления закрепа: {e}")
+
+# --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
+async def check_24h_reminders():
+    now = datetime.now()
+    target_time_start = (now + timedelta(hours=23, minutes=30)).strftime("%Y-%m-%d %H:%M")
+    target_time_end = (now + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+    
+    cursor.execute(
+        "SELECT id, subject, description, deadline, submit_url, file_id FROM tasks WHERE deadline BETWEEN ? AND ? AND notified = 0",
+        (target_time_start, target_time_end)
+    )
+    reminders = cursor.fetchall()
+    
+    for task in reminders:
+        task_id, subj, desc, dead, url, file_id = task
+        dt_format = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+        
+        alert_text = (
+            f"🚨 <b>ВНИМАНИЕ! дедлайн через 24 часа</b> 🚨\n\n"
+            f"📚 <b>Предмет:</b> {clean_html(subj)}\n"
+            f"📝 <b>Что сдать:</b> {clean_html(desc)}\n"
+            f"🔥 <b>Время:</b> <code>{dt_format}</code>\n"
+        )
+        
+        kb = None
+        if str(url).startswith("http"):
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url)]])
+        else:
+            alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
+        
+        try:
+            if file_id:
+                await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            else:
+                await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            
+            cursor.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (task_id,))
+            conn.commit()
+        except Exception as e:
+            logging.error(f"Не удалось отправить напоминание: {e}")
+
+# --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ (УДАЛЕНИЕ) ---
+# --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ (УДАЛЕНИЕ И РЕДАКТИРОВАНИЕ) ---
+@router.message(Command("manage"), F.from_user.id == ADMIN_ID)
+async def manage_tasks(message: Message):
+    cursor.execute("SELECT id, subject, deadline FROM tasks ORDER BY deadline ASC")
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        await message.answer("В базе данных пока нет заданий.")
+        return
+        
+    await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие для нужного предмета:")
+    
+    for t in tasks:
+        t_id, subj, dead = t
+        try:
+            dt = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            dt = dead
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
+            ]
+        ])
+        await message.answer(f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}", reply_markup=kb, parse_mode=ParseMode.HTML)
+
+# Обработка кнопки удаления
+@router.callback_query(F.data.startswith("del_"))
+async def delete_task_callback(callback: CallbackQuery):
+    task_id = int(callback.data.split("_")[1])
+    
+    cursor.execute("SELECT message_id FROM tasks WHERE id = ?", (task_id,))
+    res = cursor.fetchone()
+    
+    if res and res[0] != 0:
+        try:
+            await bot.delete_message(chat_id=CHANNEL_ID, message_id=res[0])
+        except Exception as e:
+            logging.error(f"Не удалось удалить пост {res[0]} из канала: {e}")
+            
+    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    
+    await callback.answer("Задание удалено!")
+    await callback.message.edit_text("🗑 Задание удалено из базы, закрепа и ленты канала.")
+    await update_pinned_post()
+
+# Нажатие на кнопку «Изменить» — выбор, что менять
+@router.callback_query(F.data.startswith("edit_"))
+async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split("_")[1])
+    await state.update_data(edit_task_id=task_id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc"),
+            InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")
+        ]
+    ])
+    
+    await callback.answer()
+    await callback.message.answer("Что именно вы хотите изменить в этом задании?", reply_markup=kb)
+    await state.set_state(EditForm.choice)
+
+# Обработка выбора (дата или описание)
+@router.callback_query(EditForm.choice)
+async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data == "change_desc":
+        await state.update_data(edit_field="description")
+        await callback.message.answer("Введите НОВОЕ описание для домашнего задания:")
+    elif callback.data == "change_date":
+        await state.update_data(edit_field="deadline")
+        await callback.message.answer("Введите НОВЫЙ дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.12.2026 15:00)")
+    await state.set_state(EditForm.new_value)
+
+# Сохранение измененного значения в базу
+@router.message(EditForm.new_value)
+async def process_edit_save(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    task_id = user_data['edit_task_id']
+    field = user_data['edit_field']
+    value = message.text
+    
+    if field == "deadline":
+        try:
+            dt = datetime.strptime(value, "%d.%m.%Y %H:%M")
+            value = dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
+            return
+
+    # Обновляем поле в БД и сбрасываем напоминалку, чтобы она пришла за 24 часа заново
+    if field == "deadline":
+        cursor.execute("UPDATE tasks SET deadline = ?, notified = 0 WHERE id = ?", (value, task_id))
+    else:
+        cursor.execute("UPDATE tasks SET description = ? WHERE id = ?", (value, task_id))
+    conn.commit()
+    
+    await state.clear()
+    await message.answer("✨ Изменения успешно сохранены! Закрепленный пост обновлен.")
+    await update_pinned_post()
+
+@router.callback_query(F.data.startswith("del_"))
+async def delete_task_callback(callback: CallbackQuery):
+    task_id = int(callback.data.split("_")[1])
+    
+    cursor.execute("SELECT message_id FROM tasks WHERE id = ?", (task_id,))
+    res = cursor.fetchone()
+    
+    if res and res[0] != 0:
+        try:
+            await bot.delete_message(chat_id=CHANNEL_ID, message_id=res[0])
+        except Exception as e:
+            logging.error(f"Не удалось удалить пост {res[0]} из канала: {e}")
+            
+    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    
+    await callback.answer("Задание удалено!")
+    await callback.message.edit_text("🗑 Задание удалено из базы, закрепа и ленты канала.")
+    await update_pinned_post()
+
+# --- ДИАЛОГ СО СТАРОСТОЙ (ДОБАВЛЕНИЕ) ---
+@router.message(Command("add"), F.from_user.id == ADMIN_ID)
+async def start_add(message: Message, state: FSMContext):
+    await message.answer("Выбери название предмета из списка:", reply_markup=subjects_keyboard)
+    await state.set_state(Form.subject)
+
+@router.message(Form.subject)
+async def process_subject(message: Message, state: FSMContext):
+    await state.update_data(subject=message.text)
+    await message.answer("Опиши, что нужно сделать (какая домашка):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Form.description)
+
+@router.message(Form.description)
+async def process_desc(message: Message, state: FSMContext):
+    await state.update_data(description=message.text)
+    await message.answer("Введи дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.09.2026 18:00)")
+    await state.set_state(Form.deadline)
+
+@router.message(Form.deadline)
+async def process_deadline(message: Message, state: FSMContext):
+    try:
+        dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
+        await state.update_data(deadline=dt.strftime("%Y-%m-%d %H:%M"))
+        await message.answer("Укажи, куда отправлять работу (ссылку или любой текст, например: на почту / в ЛС старосте):")
+        await state.set_state(Form.submit_url)
+    except ValueError:
+        await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
+
+@router.message(Form.submit_url)
+async def process_url(message: Message, state: FSMContext):
+    await state.update_data(submit_url=message.text)
+    await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+    await state.set_state(Form.file)
+
+@router.message(Form.file)
+async def process_file(message: Message, state: FSMContext):
+    data = await state.get_data()
+    file_id = None
+    
+    if message.document:
+        file_id = message.document.file_id
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+
+    # --- ПУБЛИКАЦИЯ В КАНАЛ ---
+    dt_display = datetime.strptime(data['deadline'], "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+    
+    subj_html = clean_html(data['subject'])
+    desc_html = clean_html(data['description'])
+    url_val = data['submit_url']
+    
+    # Автоматически определяем нужный хештег по ключевым словам
+    if "Биостатистика" in data['subject']:
+        hashtag = "#биостатистика"
+    elif "Молекулярная эволюция" in data['subject']:
+        hashtag = "#молекулярная_эволюция"
+    elif "Генетические основы" in data['subject']:
+        hashtag = "#селекция"
+    else:
+        hashtag = "#биоинформатика"
+    
+    new_task_text = (
+        f"📚 <b>Новое задание в расписании</b> {hashtag}\n\n"  #  Теперь заголовок будет реально жирным!
+        f"📘 <b>Предмет:</b> {subj_html}\n"
+        f"📝 <b>Что сделать:</b> {desc_html}\n"
+        f"⏰ <b>Сдать до:</b> <code>{dt_display}</code>\n"
+    )
+
+    
+    kb = None
+    if str(url_val).startswith("http"):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
+    else:
+        new_task_text += f"📥 **Куда сдавать:** {str(url_val).replace('_', '\\_').replace('*', '\\*')}\n"
+    
+    posted_message_id = 0
+    try:
+        if file_id:
+            msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode="Markdown")
+        else:
+            msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode="Markdown")
+        posted_message_id = msg.message_id  # Запоминаем ID отправленного поста
+    except Exception as e:
+        logging.error(f"Ошибка отправки в канал: {e}")
+
+    # --- СОХРАНЯЕМ В БАЗУ ДАННЫХ ВМЕСТЕ С ID ПОСТА ---
+    cursor.execute(
+        "INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (data['subject'], data['description'], data['deadline'], data['submit_url'], file_id, posted_message_id)
+    )
+    conn.commit()
+    await state.clear()
+    await message.answer("🎉 Задание успешно добавлено в базу данных!")
+
+    await update_pinned_post()
+
+# --- ЗАПУСК БОТА ---
+# Хэндлер для веб-страницы (чтобы хостинг видел, что бот живой)
+async def handle_web(request):
+    return web.Response(text="Бот активен и работает 24/7!")
+
+# --- ЗАПУСК БОТА ---
+async def main():
+    dp.include_router(router)
+    
+    # Настраиваем задачи планировщика
+    scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
+    scheduler.add_job(update_pinned_post, 'interval', minutes=15)
+    scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
+    scheduler.start()
+    
+    await update_pinned_post()
+    
+    # Создаем веб-сервер внутри aiogram для защиты от сна на Render
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render дает порт в переменных среды PORT, по умолчанию ставим 8080
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    # Запускаем чтение сообщений Telegram
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот остановлен")
