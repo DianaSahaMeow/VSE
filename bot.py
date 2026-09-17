@@ -154,7 +154,7 @@ async def update_pinned_post():
     cursor.execute("SELECT subject, description, deadline, submit_url FROM tasks ORDER BY deadline ASC")
     all_tasks = cursor.fetchall()
     
-    text = "📌 <b>Актуальные дедлайны)</b> 📌\n\n"
+    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
     if not all_tasks:
         text += "Ура! Активных заданий нет 🎉"
     else:
