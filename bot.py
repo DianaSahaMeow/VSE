@@ -261,7 +261,8 @@ async def manage_tasks(message: Message):
 # Удаление поста из ленты канала и строки из базы данных
 @router.callback_query(F.data.startswith("del_"))
 async def delete_task_callback(callback: CallbackQuery):
-    task_id = int(callback.data.split("_"))
+    task_id = int(callback.data.split("_")[1])  #  Исправлено
+
     cursor.execute("SELECT message_id FROM tasks WHERE id = ?", (task_id,))
     res = cursor.fetchone()
     
@@ -281,7 +282,8 @@ async def delete_task_callback(callback: CallbackQuery):
 # Нажатие на кнопку «Изменить» — выбор, что менять
 @router.callback_query(F.data.startswith("edit_"))
 async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
-    task_id = int(callback.data.split("_"))
+    task_id = int(callback.data.split("_")[1])  #  Исправлено
+
     await state.update_data(edit_task_id=task_id)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
