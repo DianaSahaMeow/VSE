@@ -18,8 +18,9 @@ BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
 CHANNEL_ID = -1004330638807  # ID канала с -100
 ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
+DB_URI = "postgresql://postgres:%5B/-s56B3sbWw+L&L%5D@://supabase.com"
 
-DB_URI = "postgresql://postgres:/-s56B3sbWw+L&L@db.tqpaoezbovvanysghfvl.supabase.co:5432/postgres"
+
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
