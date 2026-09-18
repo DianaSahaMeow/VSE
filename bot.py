@@ -20,9 +20,6 @@ ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 DB_URI = "postgresql://postgres:%5B/-s56B3sbWw+L%26L%5D@db.tqpaoezbovvanysghfvl.supabase.co:5432/postgres"
 
 
@@ -712,7 +709,13 @@ async def main():
 
     # Создаем пул подключений к Supabase
     # Создаем пул подключений к Supabase по экранированной защищенной строке
-    db_pool = await asyncpg.create_pool(dsn=DB_URI)
+    # Создаем пул подключений к Supabase по экранированной защищенной строке с SNI
+    import ssl
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    db_pool = await asyncpg.create_pool(dsn=DB_URI, ssl=ssl_context)
 
 
     # Настраиваем задачи планировщика
