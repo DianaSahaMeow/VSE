@@ -85,8 +85,8 @@ class NoticeForm(StatesGroup):
     pin = State()
 
 # --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (СТРУКТУРИРОВАННАЯ, С ПРОВЕРКОЙ НА ДОЛГИ) ---
+# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
 async def update_pinned_post():
-    # Наш жесткий список всех предметов для группы
     all_possible_subjects = [
         'Проектный семинар "Биоинформатика в агробиотехнологиях"',
         'Биостатистика',
@@ -94,27 +94,26 @@ async def update_pinned_post():
         'Генетические основы селекционного процесса в растениеводстве и животноводстве'
     ]
     
-    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
+    text = "📌 <b>Актулаьные дедлайны</b> 📌\n\n"
     now = datetime.now()
     
     async with db_pool.acquire() as conn:
         for subj_name in all_possible_subjects:
-            # Определяем глобальный хештег
             if "Биостатистика" in subj_name: hashtag = "#биостатистика"
             elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
             elif "Генетические основы" in subj_name: hashtag = "#селекция"
             else: hashtag = "#биоинформатика"
             
-            text += "• • • • • • • • • • • • • •\n\n"
+            # Шапка предмета
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
-            text += f"\n"
+            text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
             
-            # Ищем задачи конкретно для этого предмета
             subj_tasks = await conn.fetch("SELECT description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
             
+            # Если по предмету вообще нет никаких заданий в базе данных
             if not subj_tasks:
-                text += "📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
-                
+                text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
+                text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
                 continue
                 
             for task in subj_tasks:
@@ -128,16 +127,16 @@ async def update_pinned_post():
                     is_expired = task_deadline < now
                     
                     if is_expired:
-                        # Если дедлайн прошел — полностью зачеркиваем блок и пишем статус
+                        # Если просрочено — аккуратно зачеркиваем внутренности
                         text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
-                        text += f"📝 <s><b>Что сделать:</b> {desc}</s>\n"
-                        text += f"⏰ <s><b>Сдать до:</b> {dt}</s>\n"
+                        text += f"🔸 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
+                        text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                         if str(url).startswith("http"):
-                            text += f"📥 <s><b>Куда сдавать:</b> <a href='{url}'>Ссылка</a></s>\n"
+                            text += f"📥 <b>Куда сдавать:</b> <s><a href='{url}'>Ссылка</a></s>\n"
                         else:
-                            text += f"📥 <s><b>Куда сдавать:</b> {clean_html(url)}</s>\n"
+                            text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(url)}</s>\n"
                     else:
-                        # Если задание актуально — выводим красивым раздельным списком по строчкам
+                        # Стандартный красивый структурированный вывод по строчкам
                         text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
                         text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
                         if str(url).startswith("http"):
@@ -145,7 +144,7 @@ async def update_pinned_post():
                         else:
                             text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
                             
-                    text += "• • • • • • • • • • • • • •\n"
+                    text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
             
@@ -158,6 +157,7 @@ async def update_pinned_post():
             logging.info("Закрепленный пост проверен: изменений нет.")
         else:
             logging.error(f"Ошибка обновления закрепа: {e}")
+
 
 # Вспомогательная функция для безопасного текста в HTML
 def clean_html(text):
@@ -236,9 +236,10 @@ async def process_notice_pin(message: Message, state: FSMContext):
     await state.clear()
 #пароль 3-430dsQ
 # --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ОТОБРАЖЕНИЕМ ПРАВОК В БЛОЧНОМ ВИДЕ ---
+# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ИЗМЕНЕНИЯМИ (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
 async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
     all_possible_subjects = [
-        'Проектный seminar "Биоинформатика в агробиотехнологиях"',
+        'Проектный семинар "Биоинформатика в агробиотехнологиях"',
         'Биостатистика',
         'Молекулярная эволюция',
         'Генетические основы селекционного процесса в растениеводстве и животноводстве'
@@ -253,15 +254,15 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
             elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
             elif "Генетические основы" in subj_name: hashtag = "#селекция"
             else: hashtag = "#биоинформатика"
-            text += "• • • • • • • • • • • • • •\n\n"
+            
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
-            text += f"\n"
+            text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
             
             subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
             
             if not subj_tasks:
-                text += "📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
-             
+                text += f"🔸 📝 <b>What сделать:</b> Активных заданий нет 🎉\n"
+                text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
                 continue
                 
             for task in subj_tasks:
@@ -278,9 +279,9 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                     if t_id == changed_id:
                         text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
                         if field == "description":
-                            text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
+                            text += f"🔸 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
                         else:
-                            text += f"📝 <b>Что сделать:</b> {desc}\n"
+                            text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
                             
                         if field == "deadline":
                             text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
@@ -300,12 +301,12 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                     else:
                         if is_expired:
                             text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
-                            text += f"📝 <s><b>Что сделать:</b> {desc}</s>\n"
-                            text += f"⏰ <s><b>Сдать до:</b> {dt}</s>\n"
+                            text += f"🔸 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
+                            text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                             if str(url).startswith("http"):
-                                text += f"📥 <s><b>Куда сдавать:</b> <a href='{url}'>Ссылка</a></s>\n"
+                                text += f"📥 <b>Куда сдавать:</b> <s><a href='{url}'>Ссылка</a></s>\n"
                             else:
-                                text += f"📥 <s><b>Куда сдавать:</b> {clean_html(url)}</s>\n"
+                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(url)}</s>\n"
                         else:
                             text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
                             text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
@@ -314,7 +315,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                             else:
                                 text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
                                 
-                    text += "• • • • • • • • • • • • • •\n"
+                    text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка правок закрепа: {e}")
                     
