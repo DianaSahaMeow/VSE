@@ -21,10 +21,12 @@ PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-DB_PASS_RAW = "[/-s56B3sbWw+L&L]"  # Ваш пароль со скобками как есть
-# Автоматически маскируем скобки для безопасной передачи по сети
-DB_PASS_SAFE = urllib.parse.quote_plus(DB_PASS_RAW)
-DB_URI = f"postgresql://postgres:{DB_PASS_SAFE}@://supabase.com"
+# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
+DB_PASS_RAW = "[/-s56B3sbWw+L&L]"
+# Кодируем пароль так, чтобы он не ломал IPv6 и монолитные шлюзы
+DB_PASS_SAFE = urllib.parse.quote(DB_PASS_RAW, safe="")
+DB_URI = f"postgresql://postgres:{DB_PASS_SAFE}@db.tqpaoezbovvanysghfvl.supabase.co:5432/postgres"
+
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
