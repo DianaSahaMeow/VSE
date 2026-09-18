@@ -20,10 +20,11 @@ ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-DB_USER = "postgres"
-DB_PASSWORD = "[/-s56B3sbWw+L&L]"                    # пароль как есть
-DB_HOST = "db.tqpaoezbovvanysghfvl.supabase.co"      # ← реальный хост
-DB_PORT = 5432                                        # ← стандартный порт Postgres
+# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE (IPv4 через Session Pooler) ---
+DB_USER = "postgres.tqpaoezbovvanysghfvl"                    # ← ВАЖНО: с точкой и ID проекта!
+DB_PASSWORD = "/-s56B3sbWw+L&L"                              # пароль без %-кодирования
+DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"           # ← регион замените на свой
+DB_PORT = 5432                                               # ← session mode использует 5432
 DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
