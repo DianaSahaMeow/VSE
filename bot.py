@@ -775,8 +775,8 @@ async def main():
     
 
     # Настраиваем задачи планировщика
-    scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
-    scheduler.add_job(update_pinned_post, 'interval', minutes=15)
+    scheduler.add_job(check_24h_reminders, 'interval', minutes=5)
+    scheduler.add_job(update_pinned_post, 'interval', minutes=5)
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.start()
     
