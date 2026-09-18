@@ -21,9 +21,9 @@ PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 DB_USER = "postgres"
-DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Вставьте ваш пароль прямо так, со скобками
-DB_HOST = "://supabase.com"  # Открытый пулер шлюза
-DB_PORT = 6432
+DB_PASSWORD = "[/-s56B3sbWw+L&L]"                    # пароль как есть
+DB_HOST = "db.tqpaoezbovvanysghfvl.supabase.co"      # ← реальный хост
+DB_PORT = 5432                                        # ← стандартный порт Postgres
 DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
@@ -715,20 +715,18 @@ async def main():
     # Создаем пул подключений к Supabase по экранированной защищенной строке с SNI
     import ssl
     ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
 
-    # Создаем пул подключений к Supabase по раздельным параметрам с поддержкой SNI-шлюза
     db_pool = await asyncpg.create_pool(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME,
-        ssl="require",
-        server_settings={
-            "application_name": "://supabase.com"
-        }
+    user=DB_USER,
+    password=DB_PASSWORD,
+    host=DB_HOST,
+    port=DB_PORT,
+    database=DB_NAME,
+    ssl=ssl_context,
+    min_size=1,
+    max_size=5,
+    timeout=15,
+    command_timeout=60
     )
 
 
