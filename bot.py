@@ -733,12 +733,28 @@ async def main():
             timeout=15,
             command_timeout=60
         )
+
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS tasks (
+                id SERIAL PRIMARY KEY,
+                subject TEXT,
+                description TEXT,
+                deadline TEXT,
+                submit_url TEXT,
+                file_id TEXT,
+                notified INTEGER DEFAULT 0,
+                message_id INTEGER DEFAULT 0,
+                edit_message_ids TEXT DEFAULT ''
+            )
+            ''')
         async with db_pool.acquire() as conn:
             version = await conn.fetchval("SELECT version()")
         logging.info(f"✅ Подключение к Supabase OK: {version}")
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к БД: {e!r}")
         raise
+    
 
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
