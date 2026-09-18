@@ -715,7 +715,7 @@ async def main():
         password=DB_PASSWORD,
         host=DB_HOST,
         port=DB_PORT,
-        database=DB_NAME
+        database=DB_NAME,
         ssl="require"
     )
     # Настраиваем задачи планировщика
