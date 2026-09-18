@@ -2,3 +2,4 @@ aiogram==3.31.0
 apscheduler==3.11.3
 aiohttp
 tzdata
+asyncpg
