@@ -20,8 +20,11 @@ ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-DB_URI = "postgresql://postgres:%5B/-s56B3sbWw+L%26L%5D@db.tqpaoezbovvanysghfvl.supabase.co:5432/postgres"
-
+DB_USER = "postgres"
+DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Вставьте ваш пароль прямо так, со скобками
+DB_HOST = "://supabase.com"  # Открытый пулер шлюза
+DB_PORT = 5432
+DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -715,7 +718,18 @@ async def main():
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
 
-    db_pool = await asyncpg.create_pool(dsn=DB_URI, ssl=ssl_context)
+    # Создаем пул подключений к Supabase по раздельным параметрам с поддержкой SNI-шлюза
+    db_pool = await asyncpg.create_pool(
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME,
+        ssl="require",
+        server_settings={
+            "application_name": "://supabase.com"
+        }
+    )
 
 
     # Настраиваем задачи планировщика
