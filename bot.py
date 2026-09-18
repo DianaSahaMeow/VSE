@@ -21,9 +21,9 @@ PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 DB_USER = "postgres"
-DB_PASSWORD = "[/-s56B3sbWw+L&L]"  
-DB_HOST = "db.tqpaoezbovvanysghfvl.supabase.co"
-DB_PORT = 5432
+DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Ваш пароль со скобками
+DB_HOST = "://supabase.com"  # Официальный пулер Supabase
+DB_PORT = 5432  # Прямой порт PostgreSQL
 DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
@@ -684,7 +684,7 @@ async def main():
         host=DB_HOST,
         port=DB_PORT,
         database=DB_NAME
-)
+    )
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
     scheduler.add_job(update_pinned_post, 'interval', minutes=15)
