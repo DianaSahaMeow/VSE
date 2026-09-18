@@ -129,7 +129,7 @@ async def update_pinned_post():
                     
                     if is_expired:
                         # Если просрочено — аккуратно зачеркиваем внутренности
-                        text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
+                        text += f"❌ <b>(Дедлайн прошел)</b>\n"
                         text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
                         text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                         if str(url).startswith("http"):
@@ -302,7 +302,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                                 text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
                     else:
                         if is_expired:
-                            text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
+                            text += f"❌ <b>(Дедлайн прошел)</b>\n"
                             text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
                             text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                             if str(url).startswith("http"):
