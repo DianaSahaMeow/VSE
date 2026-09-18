@@ -221,10 +221,10 @@ async def check_24h_reminders():
         
         try:
             if file_id:
-                msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
             else:
-                msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-                posted_message_id = msg.message_id # ✅ ДОБАВЬТЕ ЭТУ СТРОКУ!
+                msg = await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
             
             cursor.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (task_id,))
             conn.commit()
@@ -279,21 +279,6 @@ async def delete_task_callback(callback: CallbackQuery):
     await callback.message.edit_text("🗑 Пост стёрт из ленты, базы и закрепа.")
     await update_pinned_post()
 
-# Нажатие на кнопку «Изменить» — выбор, что менять
-@router.callback_query(F.data.startswith("edit_"))
-async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
-    task_id = int(callback.data.split("_")[1])  #  Исправлено
-
-    await state.update_data(edit_task_id=task_id)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc")],
-        [InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")],
-        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")]
-    ])
-    await callback.answer()
-    await callback.message.answer("Что именно изменить в этом задании?", reply_markup=kb)
-    await state.set_state(EditForm.choice)
 
 @router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"})) #  Теперь поймает любой клик!
 async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
@@ -407,17 +392,7 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditForm.choice)
 
 # Обработка выбора (дата или описание)
-# Обработка выбора (дата или описание)
-@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"})) #  ИСПРАВЛЕНО
-async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if callback.data == "change_desc":
-        await state.update_data(edit_field="description")
-        await callback.message.answer("Введите НОВОЕ описание для домашнего задания:")
-    elif callback.data == "change_date":
-        await state.update_data(edit_field="deadline")
-        await callback.message.answer("Введите НОВЫЙ дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.12.2026 15:00)")
-    await state.set_state(EditForm.new_value)
+
 
 
 
