@@ -21,10 +21,10 @@ PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE (IPv4 через Session Pooler) ---
-DB_USER = "postgres.tqpaoezbovvanysghfvl"                    # ← ВАЖНО: с точкой и ID проекта!
-DB_PASSWORD = "/-s56B3sbWw+L&L"                              # пароль без %-кодирования
-DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"           # ← регион замените на свой
-DB_PORT = 5432                                               # ← session mode использует 5432
+DB_USER = "postgres.tqpaoezbovvanysghfvl"
+DB_PASSWORD = "/-s56B3sbWw+L&L"                       # без %2F, %2B, %26
+DB_HOST = "aws-1-eu-west-1.pooler.supabase.com"
+DB_PORT = 5432
 DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
@@ -715,22 +715,30 @@ async def main():
     # Создаем пул подключений к Supabase по экранированной защищенной строке
     # Создаем пул подключений к Supabase по экранированной защищенной строке с SNI
     import ssl
+
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
-    db_pool = await asyncpg.create_pool(
-    user=DB_USER,
-    password=DB_PASSWORD,
-    host=DB_HOST,
-    port=DB_PORT,
-    database=DB_NAME,
-    ssl=ssl_context,
-    min_size=1,
-    max_size=5,
-    timeout=15,
-    command_timeout=60
-    )
 
+    try:
+        db_pool = await asyncpg.create_pool(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            ssl=ssl_context,
+            min_size=1,
+            max_size=5,
+            timeout=15,
+            command_timeout=60
+        )
+        async with db_pool.acquire() as conn:
+            version = await conn.fetchval("SELECT version()")
+        logging.info(f"✅ Подключение к Supabase OK: {version}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка подключения к БД: {e!r}")
+        raise
 
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
