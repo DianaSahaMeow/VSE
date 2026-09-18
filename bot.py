@@ -25,6 +25,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 scheduler = AsyncIOScheduler() 
+db_pool = None  # <-- ДОБАВЬТЕ ЭТУ СТРОКУ!
+
 
 # --- ГЛАВНАЯ КЛАВИАТУРА СТАРОСТЫ ---
 admin_main_keyboard = ReplyKeyboardMarkup(
@@ -75,7 +77,7 @@ class EditForm(StatesGroup):    # <-- Вот этот класс обязате�
 class NoticeForm(StatesGroup):
     text = State()
     pin = State()
-    
+
 # --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (С СОРТИРОВКОЙ ПО ПРЕДМЕТАМ ПОД SUPABASE) ---
 async def update_pinned_post():
     # Открываем асинхронное подключение из пула Supabase
@@ -667,7 +669,11 @@ async def handle_web(request):
 
 # --- ЗАПУСК БОТА ---
 async def main():
+    global db_pool  # <-- ДОБАВЬТЕ ЭТУ СТРОКУ!
     dp.include_router(router)
+
+    # Создаем пул подключений к Supabase
+    db_pool = await asyncpg.create_pool(dsn=DB_URI)
     
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
