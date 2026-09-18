@@ -106,7 +106,7 @@ async def update_pinned_post():
             
             # Шапка предмета
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
-            text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+            text += f"\n"
             
             subj_tasks = await conn.fetch("SELECT description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
             
