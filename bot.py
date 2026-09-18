@@ -284,16 +284,15 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     await state.update_data(edit_task_id=task_id)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc"),
-            InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")
-        ]
+        [InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc")],
+        [InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")],
+        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")]
     ])
     await callback.answer()
     await callback.message.answer("Что именно изменить в этом задании?", reply_markup=kb)
     await state.set_state(EditForm.choice)
 
-@router.callback_query(EditForm.choice)
+@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"})) #  Теперь поймает любой клик!
 async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.data == "change_desc":
