@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -156,29 +155,34 @@ async def update_pinned_post():
 def clean_html(text):
     return str(text).replace("<", "&lt;").replace(">", "&gt;")
 # --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ---
+# --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ПОСЛЕ ДЕДЛАЙНА ---
 async def clear_old_deadlines():
-    # Находим задачи, у которых дедлайн наступил более 14 дней назад
+    # Рассчитываем временную метку: текущее время минус 14 дней
     two_weeks_ago = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
     
-    cursor.execute("SELECT id, message_id FROM tasks WHERE deadline < ?", (two_weeks_ago,))
-    old_tasks = cursor.fetchall()
-    
-    for task in old_tasks:
-        task_id, msg_id = task
-        # Удаляем оригинальный пост из ленты канала
-        if msg_id and msg_id != 0:
-            try:
-                await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
-            except Exception as e:
-                logging.error(f"Не удалось автоматически удалить старый пост {msg_id}: {e}")
-                
-        # Стираем запись из локальной базы данных
-        cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    # Открываем коннект к Supabase
+    async with db_pool.acquire() as conn:
+        old_tasks = await conn.fetch("SELECT id, message_id FROM tasks WHERE deadline < $1", two_weeks_ago)
         
-    if old_tasks:
-        conn.commit()
-        logging.info(f"Автоочистка: удалено просроченных заданий: {len(old_tasks)}")
-        await update_pinned_post()
+        for task in old_tasks:
+            task_id = task['id']
+            msg_id = task['message_id']
+            
+            # Удаляем оригинальный пост из ленты канала
+            if msg_id and msg_id != 0:
+                try:
+                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                except Exception as e:
+                    logging.error(f"Не удалось автоматически удалить старый пост {msg_id}: {e}")
+                    
+            # Стираем запись из облачной базы данных
+            await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+            
+        if old_tasks:
+            logging.info(f"Автоочистка архива: успешно удалено заданий: {len(old_tasks)}")
+            await update_pinned_post()
+
+
 # --- ДИАЛОГ ДЛЯ ВАЖНЫХ ОБЪЯВЛЕНИЙ ---
 @router.message(Command("alert"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '📢 Важное объявление', F.from_user.id == ADMIN_ID)
@@ -295,73 +299,73 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
         logging.error(f"Ошибка правок закрепа: {e}")
 
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
+# --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ПОД SUPABASE ---
 async def check_24h_reminders():
     now = datetime.now()
     target_time_start = (now + timedelta(hours=23, minutes=30)).strftime("%Y-%m-%d %H:%M")
     target_time_end = (now + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
     
-    cursor.execute(
-        "SELECT id, subject, description, deadline, submit_url, file_id FROM tasks WHERE deadline BETWEEN ? AND ? AND notified = 0",
-        (target_time_start, target_time_end)
-    )
-    reminders = cursor.fetchall()
-    
-    for task in reminders:
-        task_id, subj, desc, dead, url, file_id = task
-        dt_format = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-        
-        alert_text = (
-            f"🚨 <b>ВНИМАНИЕ! дедлайн через 24 часа</b> 🚨\n\n"
-            f"📚 <b>Предмет:</b> {clean_html(subj)}\n"
-            f"📝 <b>Что сдать:</b> {clean_html(desc)}\n"
-            f"🔥 <b>Время:</b> <code>{dt_format}</code>\n"
+    async with db_pool.acquire() as conn:
+        reminders = await conn.fetch(
+            "SELECT id, subject, description, deadline, submit_url, file_id FROM tasks WHERE deadline BETWEEN $1 AND $2 AND notified = 0", 
+            target_time_start, target_time_end
         )
         
-        kb = None
-        if str(url).startswith("http"):
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url)]])
-        else:
-            alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
-        
-        try:
-            if file_id:
-                msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            else:
-                msg = await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
+        for task in reminders:
+            task_id = task['id']
+            dt_format = datetime.strptime(task['deadline'], "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
             
-            cursor.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (task_id,))
-            conn.commit()
-        except Exception as e:
-            logging.error(f"Не удалось отправить напоминание: {e}")
+            alert_text = (
+                f"🚨 <b>ВНИМАНИЕ! дедлайн через 24 часа</b> 🚨\n\n"
+                f"📚 <b>Предмет:</b> {clean_html(task['subject'])}\n"
+                f"📝 <b>Что сдать:</b> {clean_html(task['description'])}\n"
+                f"🔥 <b>Время:</b> <code>{dt_format}</code>\n"
+            )
+            
+            kb = None
+            if str(task['submit_url']).startswith("http"):
+                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=task['submit_url'])]])
+            else:
+                alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(task['submit_url'])}\n"
+            
+            try:
+                if task['file_id']:
+                    await bot.send_document(chat_id=CHANNEL_ID, document=task['file_id'], caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                else:
+                    await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                
+                await conn.execute("UPDATE tasks SET notified = 1 WHERE id = $1", task_id)
+            except Exception as e:
+                logging.error(f"Не удалось отправить напоминание: {e}")
 
 # --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ (УДАЛЕНИЕ И ИЗМЕНЕНИЕ) ---
+# --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ ДЛЯ SUPABASE ---
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
 async def manage_tasks(message: Message):
-    cursor.execute("SELECT id, subject, deadline FROM tasks ORDER BY deadline ASC")
-    tasks = cursor.fetchall()
-    
-    if not tasks:
-        await message.answer("В базе данных пока нет заданий.")
-        return
+    async with db_pool.acquire() as conn:
+        tasks = await conn.fetch("SELECT id, subject, deadline FROM tasks ORDER BY deadline ASC")
         
-    await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:")
-    
-    for t in tasks:
-        t_id, subj, dead = t
-        try:
-            dt = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-        except Exception:
-            dt = dead
+        if not tasks:
+            await message.answer("В базе данных пока нет заданий.")
+            return
+            
+        await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:")
         
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
-                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
-            ]
-        ])
-        await message.answer(f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}", reply_markup=kb, parse_mode=ParseMode.HTML)
+        for t in tasks:
+            t_id, subj, dead = t['id'], t['subject'], t['deadline']
+            try:
+                dt = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                dt = dead
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
+                    InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
+                ]
+            ])
+            await message.answer(f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}", reply_markup=kb, parse_mode=ParseMode.HTML)
 
 # Удаление поста из ленты канала и строки из базы данных
 @router.callback_query(F.data.startswith("del_"))
@@ -657,15 +661,17 @@ async def process_file(message: Message, state: FSMContext):
 
 
     # --- СОХРАНЯЕМ В БАЗУ ДАННЫХ ВМЕСТЕ С ID ПОСТА ---
-    cursor.execute(
-        "INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (data['subject'], data['description'], data['deadline'], data['submit_url'], file_id, posted_message_id)
-    )
-    conn.commit()
-    await state.clear()
-    await message.answer("🎉 Задание успешно добавлено в базу данных!")
+    # --- СОХРАНЯЕМ В ОБЛАЧНУЮ БАЗУ SUPABASE ---
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            data['subject'], data['description'], data['deadline'], data['submit_url'], file_id, posted_message_id
+        )
 
+    await state.clear()
+    await message.answer("🎉 Задание успешно добавлено в базу данных!", reply_markup=admin_main_keyboard)
     await update_pinned_post()
+
 
 # --- ЗАПУСК БОТА ---
 # Хэндлер для веб-страницы (чтобы хостинг видел, что бот живой)
@@ -684,6 +690,7 @@ async def main():
         host=DB_HOST,
         port=DB_PORT,
         database=DB_NAME
+        ssl="require"
     )
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
