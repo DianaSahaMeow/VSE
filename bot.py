@@ -23,7 +23,7 @@ PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 DB_USER = "postgres"
 DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Вставьте ваш пароль прямо так, со скобками
 DB_HOST = "://supabase.com"  # Открытый пулер шлюза
-DB_PORT = 5432
+DB_PORT = 6432
 DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
