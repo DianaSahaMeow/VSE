@@ -221,9 +221,10 @@ async def check_24h_reminders():
         
         try:
             if file_id:
-                await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                posted_message_id = msg.message_id # ✅ ДОБАВЬТЕ ЭТУ СТРОКУ!
             
             cursor.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (task_id,))
             conn.commit()
@@ -386,26 +387,6 @@ async def process_edit_save(message: Message, state: FSMContext):
     await message.answer("✨ Изменения сохранены! Пост в ленте и закрепе обновлен.")
     await update_pinned_post()
 
-# Обработка кнопки удаления
-@router.callback_query(F.data.startswith("del_"))
-async def delete_task_callback(callback: CallbackQuery):
-    task_id = int(callback.data.split("_")[1])
-    
-    cursor.execute("SELECT message_id FROM tasks WHERE id = ?", (task_id,))
-    res = cursor.fetchone()
-    
-    if res and res[0] != 0:
-        try:
-            await bot.delete_message(chat_id=CHANNEL_ID, message_id=res[0])
-        except Exception as e:
-            logging.error(f"Не удалось удалить пост {res[0]} из канала: {e}")
-            
-    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    
-    await callback.answer("Задание удалено!")
-    await callback.message.edit_text("🗑 Задание удалено из базы, закрепа и ленты канала.")
-    await update_pinned_post()
 
 # Нажатие на кнопку «Изменить» — выбор, что менять
 @router.callback_query(F.data.startswith("edit_"))
@@ -414,10 +395,9 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     await state.update_data(edit_task_id=task_id)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc"),
-            InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")
-        ]
+        [InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc")],
+        [InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")],
+        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")] #  Добавили третью кнопку
     ])
     
     await callback.answer()
@@ -425,7 +405,8 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditForm.choice)
 
 # Обработка выбора (дата или описание)
-@router.callback_query(EditForm.choice)
+# Обработка выбора (дата или описание)
+@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"})) #  ИСПРАВЛЕНО
 async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.data == "change_desc":
@@ -436,52 +417,7 @@ async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Введите НОВЫЙ дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.12.2026 15:00)")
     await state.set_state(EditForm.new_value)
 
-# Сохранение измененного значения в базу
-@router.message(EditForm.new_value)
-async def process_edit_save(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    task_id = user_data['edit_task_id']
-    field = user_data['edit_field']
-    value = message.text
-    
-    if field == "deadline":
-        try:
-            dt = datetime.strptime(value, "%d.%m.%Y %H:%M")
-            value = dt.strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
-            return
 
-    # Обновляем поле в БД и сбрасываем напоминалку, чтобы она пришла за 24 часа заново
-    if field == "deadline":
-        cursor.execute("UPDATE tasks SET deadline = ?, notified = 0 WHERE id = ?", (value, task_id))
-    else:
-        cursor.execute("UPDATE tasks SET description = ? WHERE id = ?", (value, task_id))
-    conn.commit()
-    
-    await state.clear()
-    await message.answer("✨ Изменения успешно сохранены! Закрепленный пост обновлен.")
-    await update_pinned_post()
-
-@router.callback_query(F.data.startswith("del_"))
-async def delete_task_callback(callback: CallbackQuery):
-    task_id = int(callback.data.split("_")[1])
-    
-    cursor.execute("SELECT message_id FROM tasks WHERE id = ?", (task_id,))
-    res = cursor.fetchone()
-    
-    if res and res[0] != 0:
-        try:
-            await bot.delete_message(chat_id=CHANNEL_ID, message_id=res[0])
-        except Exception as e:
-            logging.error(f"Не удалось удалить пост {res[0]} из канала: {e}")
-            
-    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    
-    await callback.answer("Задание удалено!")
-    await callback.message.edit_text("🗑 Задание удалено из базы, закрепа и ленты канала.")
-    await update_pinned_post()
 
 # --- ДИАЛОГ СО СТАРОСТОЙ (ДОБАВЛЕНИЕ) ---
 @router.message(Command("add"), F.from_user.id == ADMIN_ID)
@@ -556,15 +492,16 @@ async def process_file(message: Message, state: FSMContext):
     if str(url_val).startswith("http"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
     else:
-        new_task_text += f"📥 **Куда сдавать:** {str(url_val).replace('_', '\\_').replace('*', '\\*')}\n"
+        new_task_text += f"📥 <b>Куда сдавать:</b> {str(url_val).replace('_', '\\_').replace('*', '\\*')}\n"
     
     posted_message_id = 0
     try:
         if file_id:
             msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            posted_message_id = msg.message_id
         else:
-            msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML) #  Исправлено на HTML
-        posted_message_id = msg.message_id
+            msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            posted_message_id = msg.message_id
     except Exception as e:
         logging.error(f"Ошибка отправки в канал: {e}")
 
@@ -608,17 +545,11 @@ async def main():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    
     # Запускаем чтение сообщений Telegram
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен")
