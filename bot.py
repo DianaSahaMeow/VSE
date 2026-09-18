@@ -717,7 +717,7 @@ async def main():
     import ssl
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NON
+    ssl_context.verify_mode = ssl.CERT_NONE
     db_pool = await asyncpg.create_pool(
     user=DB_USER,
     password=DB_PASSWORD,
