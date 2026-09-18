@@ -189,6 +189,68 @@ async def update_pinned_post():
         await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         logging.error(f"Ошибка обновления закрепа: {e}")
+# Специальное обновление закрепа, отображающее перечеркнутые правки
+async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
+    cursor.execute("SELECT id, subject, description, deadline, submit_url FROM tasks ORDER BY deadline ASC")
+    all_tasks = cursor.fetchall()
+    
+    text = "📌 <b>Актуальные дедлайны)</b> 📌\n\n"
+    if not all_tasks:
+        text += "Ура! Активных заданий нет 🎉"
+    else:
+        now = datetime.now()
+        for task in all_tasks:
+            t_id, subj_raw, desc_raw, dead_raw, url_raw = task
+            try:
+                task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
+                dt = task_deadline.strftime("%d.%m.%Y %H:%M")
+                is_expired = task_deadline < now
+                
+                subj = clean_html(subj_raw)
+                desc = clean_html(desc_raw)
+                url = url_raw
+                
+                # Если это именно та задача, которую только что изменили
+                if t_id == changed_id:
+                    text += f"🔄 <b>Предмет:</b> {subj} (ИЗМЕНЕНО)\n"
+                    if field == "description":
+                        text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
+                    else:
+                        text += f"📝 <b>Что сделать:</b> {desc}\n"
+                    if field == "deadline":
+                        text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
+                    else:
+                        text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
+                    if str(url).startswith("http"):
+                        if field == "submit_url":
+                            text += f"📥 <b>Сдача:</b> <s>{clean_html(old_url)}</s> ➡️ <a href='{url}'>Ссылка</a>\n"
+                        else:
+                            text += f"📥 <b>Сдача:</b> <a href='{url}'>Ссылка</a>\n"
+                    else:
+                        if field == "submit_url":
+                            text += f"📥 <b>Сдача:</b> <s>{clean_html(old_url)}</s> ➡️ {clean_html(url)}\n"
+                        else:
+                            text += f"📥 <b>Сдача:</b> {clean_html(url)}\n"
+                else:
+                    # Для всех остальных задач выводим стандартный вид
+                    if is_expired:
+                        if str(url).startswith("http"):
+                            text += f"❌ <s><b>Предмет:</b> {subj}\n<b>Что сделать:</b> {desc}\n<b>Сдать до:</b> {dt}\n<b>Сдача:</b> <a href='{url}'>Ссылка</a></s>\n"
+                        else:
+                            text += f"❌ <s><b>Предмет:</b> {subj}\n<b>Что сделать:</b> {desc}\n<b>Сдать до:</b> {dt}\n<b>Сдача:</b> {clean_html(url)}</s>\n"
+                    else:
+                        if str(url).startswith("http"):
+                            text += f"📘 <b>Предмет:</b> {subj}\n📝 <b>Что сделать:</b> {desc}\n⏰ <b>Сдать до:</b> <code>{dt}</code>\n📥 <b>Сдача:</b> <a href='{url}'>Ссылка</a>\n"
+                        else:
+                            text += f"📘 <b>Предмет:</b> {subj}\n📝 <b>Что сделать:</b> {desc}\n⏰ <b>Сдать до:</b> <code>{dt}</code>\n📥 <b>Сдача:</b> {clean_html(url)}\n"
+                text += "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+            except Exception as e:
+                logging.error(f"Ошибка парсинга правок в закрепе: {e}")
+            
+    try:
+        await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        logging.error(f"Ошибка правок закрепа: {e}")
 
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
 async def check_24h_reminders():
@@ -294,6 +356,7 @@ async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Укажите НОВОЕ место сдачи (ссылку, почту или Telegram):")
     await state.set_state(EditForm.new_value)
 # Логика автоматического редактирования старого поста в самом канале
+# Логика автоматического редактирования, перечеркивания и отправки пуш-уведомления об изменениях
 @router.message(EditForm.new_value)
 async def process_edit_save(message: Message, state: FSMContext):
     user_data = await state.get_data()
@@ -319,7 +382,7 @@ async def process_edit_save(message: Message, state: FSMContext):
             await message.answer("Неверный формат! Введите ДД.ММ.ГГГГ ЧЧ:ММ:")
             return
 
-    # Записываем изменения в базу данных в зависимости от выбранного поля
+    # Записываем изменения в базу данных
     if field == "deadline":
         cursor.execute("UPDATE tasks SET deadline = ?, notified = 0 WHERE id = ?", (new_text, task_id))
         final_dead, final_desc, final_url = new_text, old_desc, old_url
@@ -331,7 +394,7 @@ async def process_edit_save(message: Message, state: FSMContext):
         final_dead, final_desc, final_url = old_dead, old_desc, new_text
     conn.commit()
     
-    # Форматируем даты для красивого отображения изменений
+    # Форматируем даты для текста изменений
     dt_old_format = datetime.strptime(old_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
     dt_new_format = datetime.strptime(final_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
     
@@ -340,20 +403,17 @@ async def process_edit_save(message: Message, state: FSMContext):
     elif "Генетические основы" in subj: hashtag = "#селекция"
     else: hashtag = "#биоинформатика"
 
-    # Собираем измененный текст поста
+    # 1. ТЕКСТ ДЛЯ ОБНОВЛЕНИЯ СТАРОГО ПОСТА В ЛЕНТЕ (С ПЕРЕЧЕРКИВАНИЕМ)
     edited_post_text = f"🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО</b> {hashtag}\n\n📘 <b>Предмет:</b> {clean_html(subj)}\n"
-    
     if field == "description":
         edited_post_text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
     else:
         edited_post_text += f"📝 <b>Что сделать:</b> {clean_html(final_desc)}\n"
-        
     if field == "deadline":
         edited_post_text += f"⏰ <b>Сдать до:</b> <s>{dt_old_format}</s> ➡️ <code>{dt_new_format}</code>\n"
     else:
         edited_post_text += f"⏰ <b>Сдать до:</b> <code>{dt_new_format}</code>\n"
 
-    # Настраиваем блок сдачи (кнопка или текст)
     kb = None
     if str(final_url).startswith("http"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=final_url)]])
@@ -363,16 +423,31 @@ async def process_edit_save(message: Message, state: FSMContext):
         else:
             edited_post_text += f"📥 <b>Куда сдавать:</b> {clean_html(final_url)}\n"
 
-    # Редактируем старый оригинальный пост в ленте канала
     if msg_id and msg_id != 0:
         try:
             await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=edited_post_text, reply_markup=kb, parse_mode=ParseMode.HTML)
         except Exception as e:
             logging.error(f"Не удалось изменить пост {msg_id} в ленте канала: {e}")
 
+    # 2. ОТПРАВЛЯЕМ НОВОЕ ОТДЕЛЬНОЕ СООБЩЕНИЕ УВЕДОМЛЕНИЯ В КАНАЛ
+    alert_channel_text = f"🔔 <b>ВНИМАНИЕ! ЗАДАНИЕ ИЗМЕНЕНО</b> {hashtag}\n___________________________\n📚 <b>Предмет:</b> {clean_html(subj)}\n"
+    if field == "description":
+        alert_channel_text += f"❌ <s><b>Было:</b> {clean_html(old_desc)}</s>\n✅ <b>Стало:</b> {clean_html(new_text)}\n"
+    elif field == "deadline":
+        alert_channel_text += f"❌ <s><b>Срок был:</b> {dt_old_format}</s>\n✅ <b>Новый срок:</b> <code>{dt_new_format}</code>\n"
+    elif field == "submit_url":
+        alert_channel_text += f"❌ <s><b>Сдача была:</b> {clean_html(old_url)}</s>\n✅ <b>Новая сдача:</b> {clean_html(new_text)}\n"
+    alert_channel_text += "___________________________\n📋 Изменения внесены в закрепленный пост группы!"
+
+    try:
+        await bot.send_message(chat_id=CHANNEL_ID, text=alert_channel_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logging.error(f"Ошибка отправки уведомления об изменении: {e}")
+
+    # Передаем данные правок в функцию закрепа, чтобы зачерикнуть старое прямо там
     await state.clear()
-    await message.answer("✨ Изменения сохранены! Пост в ленте и закрепе обновлен.")
-    await update_pinned_post()
+    await message.answer("✨ Изменения сохранены! Оригинальный пост переписан, закреп обновлен, уведомление отправлено в канал.")
+    await update_pinned_post_with_change(task_id, field, old_desc, dt_old_format, old_url)
 
 
 # Нажатие на кнопку «Изменить» — выбор, что менять
