@@ -14,13 +14,11 @@ from aiohttp import web
 import asyncpg
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
-CHANNEL_ID = -1004330638807  # ID канала с -100
-ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
-PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
-DB_URI = "postgresql://postgres:%5B/-s56B3sbWw+L&L%5D@://supabase.com"
-
-
+DB_USER = "postgres"
+DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Вставьте ваш пароль прямо так, со скобками
+DB_HOST = "db.tqpaoezbovvanysghfvl.supabase.co"
+DB_PORT = 5432
+DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -674,8 +672,13 @@ async def main():
     dp.include_router(router)
 
     # Создаем пул подключений к Supabase
-    db_pool = await asyncpg.create_pool(dsn=DB_URI)
-    
+    db_pool = await asyncpg.create_pool(
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME
+)
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
     scheduler.add_job(update_pinned_post, 'interval', minutes=15)
