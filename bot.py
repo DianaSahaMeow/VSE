@@ -19,11 +19,11 @@ ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-DB_USER = "postgres"
-DB_PASSWORD = "/-s56B3sbWw+L&L"  # Ваш чистый пароль без кодирования и внешних скобок
-DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"  # Специальный открытый шлюз пулера
-DB_PORT = 5432  
-DB_NAME = "postgres"
+# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
+DB_PASS_RAW = "[/-s56B3sbWw+L&L]"  # Ваш пароль со скобками как есть
+# Автоматически маскируем скобки для безопасной передачи по сети
+DB_PASS_SAFE = urllib.parse.quote_plus(DB_PASS_RAW)
+DB_URI = f"postgresql://postgres:{DB_PASS_SAFE}@://supabase.com"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -710,17 +710,9 @@ async def main():
     dp.include_router(router)
 
     # Создаем пул подключений к Supabase
-    db_pool = await asyncpg.create_pool(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME,
-        ssl="require",
-        server_settings={
-            "application_name": "://supabase.com"
-        }
-    )
+    # Создаем пул подключений к Supabase по экранированной защищенной строке
+    db_pool = await asyncpg.create_pool(dsn=DB_URI)
+
 
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
