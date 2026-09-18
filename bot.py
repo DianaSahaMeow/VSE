@@ -21,9 +21,9 @@ PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 DB_USER = "postgres"
-DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Ваш пароль со скобками
-DB_HOST = "db.tqpaoezbovvanysghfvl.supabase.co"  # Официальный пулер Supabase
-DB_PORT = 5432  # Прямой порт PostgreSQL
+DB_PASSWORD = "/-s56B3sbWw+L&L"  # Ваш чистый пароль без кодирования и внешних скобок
+DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"  # Специальный открытый шлюз пулера
+DB_PORT = 5432  
 DB_NAME = "postgres"
 
 bot = Bot(token=BOT_TOKEN)
