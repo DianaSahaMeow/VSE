@@ -13,9 +13,15 @@ from aiogram.enums import ParseMode
 from aiohttp import web
 import asyncpg
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ TELEGRAM БОТА ---
+BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
+CHANNEL_ID = -1004330638807  # ID канала с -100
+ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
+PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
+
+# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 DB_USER = "postgres"
-DB_PASSWORD = "[/-s56B3sbWw+L&L]"  # Вставьте ваш пароль прямо так, со скобками
+DB_PASSWORD = "[/-s56B3sbWw+L&L]"  
 DB_HOST = "db.tqpaoezbovvanysghfvl.supabase.co"
 DB_PORT = 5432
 DB_NAME = "postgres"
