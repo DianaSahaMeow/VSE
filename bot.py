@@ -716,7 +716,8 @@ async def main():
     # Создаем пул подключений к Supabase по экранированной защищенной строке с SNI
     import ssl
     ssl_context = ssl.create_default_context()
-
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NON
     db_pool = await asyncpg.create_pool(
     user=DB_USER,
     password=DB_PASSWORD,
