@@ -10,8 +10,16 @@ from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.enums import ParseMode
 from aiohttp import web
+
+
 import asyncpg
-import urllib.parse 
+import urllib.parse
+from zoneinfo import ZoneInfo
+
+MSK = ZoneInfo("Europe/Moscow")
+
+def now_msk() -> datetime:
+    return datetime.now(MSK).replace(tzinfo=None)
 
 # --- НАСТРОЙКИ TELEGRAM БОТА ---
 BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
@@ -370,7 +378,110 @@ async def check_24h_reminders():
             except Exception as e:
                 logging.error(f"Не удалось отправить напоминание: {e}")
 
-# --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ (УДАЛЕНИЕ И ИЗМЕНЕНИЕ) ---
+# --- УВЕДОМЛЕНИЯ О ПАРАХ ЗА 10 МИНУТ (РАСПИСАНИЕ ИЗ БД) ---
+def get_hashtag_by_subject(subj: str) -> str:
+    if "Биостатистика" in subj: return "#биостатистика"
+    if "Молекулярная эволюция" in subj: return "#молекулярная_эволюция"
+    if "Генетические основы" in subj: return "#селекция"
+    if "Проектный семинар" in subj: return "#биоинформатика"
+    if "Молекулярная биология" in subj: return "#молекулярная_биология"
+    if "Семинар наставника" in subj: return "#наставник"
+    if "Организационная встреча" in subj: return "#орг"
+    return "#инфо"
+
+
+async def send_lesson_reminders():
+    """За 10 минут до пары отправляет уведомление в канал."""
+    now = now_msk()
+
+    async with db_pool.acquire() as conn:
+        # Берём все пары за вчера/сегодня/завтра, по которым ещё не отправлено
+        rows = await conn.fetch(
+            """
+            SELECT id, lesson_date, start_time, end_time, subject, kind, url
+            FROM schedule
+            WHERE lesson_date BETWEEN CURRENT_DATE - INTERVAL '1 day'
+                                  AND CURRENT_DATE + INTERVAL '1 day'
+              AND notified = FALSE
+            """
+        )
+
+        for row in rows:
+            try:
+                start_dt = datetime.strptime(
+                    f"{row['lesson_date']} {row['start_time']}",
+                    "%Y-%m-%d %H:%M"
+                )
+            except ValueError:
+                continue
+
+            diff_min = (start_dt - now).total_seconds() / 60
+
+            # Отправляем ровно в окне 9.5–10.5 минут до начала
+            if 9.5 <= diff_min <= 10.5:
+                subj = row['subject']
+                hashtag = get_hashtag_by_subject(subj)
+                text = (
+                    f"⏰ <b>Через 10 минут начнётся пара!</b>\n\n"
+                    f"📘 <b>Предмет:</b> {clean_html(subj)}\n"
+                    f"🎓 <b>Тип:</b> {row['kind']}\n"
+                    f"🕒 <b>Начало:</b> <code>{row['start_time']}</code> – <code>{row['end_time']}</code>\n"
+                    f"🔗 <b>Ссылка:</b> <a href='{row['url']}'>Телемост</a>\n\n"
+                    f"{hashtag}"
+                )
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎥 Подключиться", url=row['url'])]
+                ])
+                try:
+                    msg = await bot.send_message(
+                        chat_id=CHANNEL_ID, text=text,
+                        reply_markup=kb, parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                    await conn.execute(
+                        "UPDATE schedule SET notified = TRUE, message_id = $1 WHERE id = $2",
+                        msg.message_id, row['id']
+                    )
+                    logging.info(f"Отправлено уведомление о паре: {subj} в {row['start_time']}")
+                except Exception as e:
+                    logging.error(f"Ошибка отправки уведомления о паре: {e}")
+
+
+async def cleanup_lesson_reminders():
+    """Удаляет уведомления, отправленные более 15 минут назад после начала пары."""
+    now = now_msk()
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, lesson_date, start_time, message_id
+            FROM schedule
+            WHERE notified = TRUE AND message_id > 0
+            """
+        )
+
+        for row in rows:
+            try:
+                start_dt = datetime.strptime(
+                    f"{row['lesson_date']} {row['start_time']}",
+                    "%Y-%m-%d %H:%M"
+                )
+            except ValueError:
+                continue
+
+            # Если с начала пары прошло больше 15 минут — удаляем сообщение
+            if (now - start_dt).total_seconds() > 15 * 60:
+                try:
+                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
+                    logging.info(f"Удалено уведомление (msg_id={row['message_id']})")
+                except Exception as e:
+                    logging.error(f"Не удалось удалить уведомление {row['message_id']}: {e}")
+                await conn.execute(
+                    "UPDATE schedule SET message_id = 0 WHERE id = $1",
+                    row['id']
+                )
+
+
 # --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ ДЛЯ SUPABASE ---
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
@@ -769,6 +880,22 @@ async def main():
                 edit_message_ids TEXT DEFAULT ''
             )
             ''')
+
+            async with db_pool.acquire() as conn:
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS schedule (
+                    id SERIAL PRIMARY KEY,
+                    lesson_date DATE NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    notified BOOLEAN DEFAULT FALSE,
+                    message_id BIGINT DEFAULT 0,
+                    module INTEGER DEFAULT 1
+                )
+                ''')
         async with db_pool.acquire() as conn:
             version = await conn.fetchval("SELECT version()")
         logging.info(f"✅ Подключение к Supabase OK: {version}")
@@ -778,9 +905,12 @@ async def main():
     
 
     # Настраиваем задачи планировщика
+    # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=5)
     scheduler.add_job(update_pinned_post, 'interval', minutes=5)
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
+    scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
+    scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
     scheduler.start()
     
     await update_pinned_post()
