@@ -130,15 +130,15 @@ async def update_pinned_post():
                         if is_expired:
                             # Если дедлайн прошел — зачеркиваем и дописываем статус
                             if str(url).startswith("http"):
-                                text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
+                                text += f"❌ <s> {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
                             else:
-                                text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
+                                text += f"❌ <s> {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
                         else:
                             # Если актуально — выводим красиво
                             if str(url).startswith("http"):
-                                text += f"🔸 • {desc} (до <code>{dt}</code>) — <a href='{url}'>Ссылка</a>\n"
+                                text += f"🔸  {desc} (до <code>{dt}</code>) — <a href='{url}'>Ссылка</a>\n"
                             else:
-                                text += f"🔸 • {desc} (до <code>{dt}</code>) — {clean_html(url)}\n"
+                                text += f"🔸  {desc} (до <code>{dt}</code>) — {clean_html(url)}\n"
                     except Exception as e:
                         logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
                         
