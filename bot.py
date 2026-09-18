@@ -94,7 +94,7 @@ async def update_pinned_post():
         'Генетические основы селекционного процесса в растениеводстве и животноводстве'
     ]
     
-    text = "📌 <b>Актулаьные дедлайны</b> 📌\n\n"
+    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
     now = datetime.now()
     
     async with db_pool.acquire() as conn:
@@ -116,7 +116,8 @@ async def update_pinned_post():
                 text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
                 continue
                 
-            for task in subj_tasks:
+                        # Запускаем счетчик перед перебором задач предмета
+            for idx, task in enumerate(subj_tasks, start=1):
                 try:
                     desc = clean_html(task['description'])
                     dead_raw = task['deadline']
@@ -129,15 +130,15 @@ async def update_pinned_post():
                     if is_expired:
                         # Если просрочено — аккуратно зачеркиваем внутренности
                         text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
-                        text += f"🔸 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
+                        text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
                         text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                         if str(url).startswith("http"):
                             text += f"📥 <b>Куда сдавать:</b> <s><a href='{url}'>Ссылка</a></s>\n"
                         else:
                             text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(url)}</s>\n"
                     else:
-                        # Стандартный красивый структурированный вывод по строчкам
-                        text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
+                        # Структурированный вывод с цифрой по порядку
+                        text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
                         text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
                         if str(url).startswith("http"):
                             text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
@@ -147,7 +148,7 @@ async def update_pinned_post():
                     text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
-            
+
             text += "\n" # Отступ между блоками предметов
             
     try:
@@ -256,7 +257,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
             else: hashtag = "#биоинформатика"
             
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
-            text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+            text += f"\n"
             
             subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
             
@@ -265,7 +266,8 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                 text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
                 continue
                 
-            for task in subj_tasks:
+                        # Запускаем счетчик перед перебором задач предмета
+            for idx, task in enumerate(subj_tasks, start=1):
                 try:
                     t_id = task['id']
                     desc = clean_html(task['description'])
@@ -279,9 +281,9 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                     if t_id == changed_id:
                         text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
                         if field == "description":
-                            text += f"🔸 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
+                            text += f"{idx}. 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
                         else:
-                            text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
+                            text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
                             
                         if field == "deadline":
                             text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
@@ -301,14 +303,14 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                     else:
                         if is_expired:
                             text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
-                            text += f"🔸 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
+                            text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
                             text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                             if str(url).startswith("http"):
                                 text += f"📥 <b>Куда сдавать:</b> <s><a href='{url}'>Ссылка</a></s>\n"
                             else:
                                 text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(url)}</s>\n"
                         else:
-                            text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
+                            text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
                             text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
                             if str(url).startswith("http"):
                                 text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
@@ -318,6 +320,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                     text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка правок закрепа: {e}")
+
                     
             text += "\n"
             
