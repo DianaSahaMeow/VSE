@@ -105,6 +105,7 @@ async def update_pinned_post():
             elif "Генетические основы" in subj_name: hashtag = "#селекция"
             else: hashtag = "#биоинформатика"
             
+            text += "• • • • • • • • • • • • • •\n\n"
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
             text += f"\n"
             
@@ -113,7 +114,7 @@ async def update_pinned_post():
             
             if not subj_tasks:
                 text += "📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
-                text += "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
+                
                 continue
                 
             for task in subj_tasks:
@@ -234,84 +235,95 @@ async def process_notice_pin(message: Message, state: FSMContext):
         
     await state.clear()
 #пароль 3-430dsQ
-# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ОТОБРАЖЕНИЕМ ПРАВОК И СОРТИРОВКОЙ ПО ПРЕДМЕТАМ (ПОД SUPABASE) ---
+# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ОТОБРАЖЕНИЕМ ПРАВОК В БЛОЧНОМ ВИДЕ ---
 async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
+    all_possible_subjects = [
+        'Проектный seminar "Биоинформатика в агробиотехнологиях"',
+        'Биостатистика',
+        'Молекулярная эволюция',
+        'Генетические основы селекционного процесса в растениеводстве и животноводстве'
+    ]
+    
+    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
+    now = datetime.now()
+    
     async with db_pool.acquire() as conn:
-        # Вытаскиваем список уникальных предметов
-        unique_subjects_rows = await conn.fetch("SELECT DISTINCT subject FROM tasks")
-        unique_subjects = [row['subject'] for row in unique_subjects_rows]
-        
-        text = "📌 <b>Актулаьные дедлайны</b> 📌\n\n"
-        
-        if not unique_subjects:
-            text += "Ура! Активных заданий нет 🎉"
-        else:
-            now = datetime.now()
-            for subj_name in unique_subjects:
-                if "Биостатистика" in subj_name: hashtag = "#биостатистика"
-                elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
-                elif "Генетические основы" in subj_name: hashtag = "#селекция"
-                else: hashtag = "#биоинформатика"
+        for subj_name in all_possible_subjects:
+            if "Биостатистика" in subj_name: hashtag = "#биостатистика"
+            elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
+            elif "Генетические основы" in subj_name: hashtag = "#селекция"
+            else: hashtag = "#биоинформатика"
+            text += "• • • • • • • • • • • • • •\n\n"
+            text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
+            text += f"\n"
+            
+            subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
+            
+            if not subj_tasks:
+                text += "📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
+             
+                continue
                 
-                text += f"📘 <b>{clean_html(subj_name)}</b> {hashtag}\n"
-                text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
-                
-                # Вытаскиваем таски предмета
-                subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
-                
-                for task in subj_tasks:
-                    try:
-                        t_id = task['id']
-                        desc_raw = task['description']
-                        dead_raw = task['deadline']
-                        url_raw = task['submit_url']
-                        
-                        task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
-                        dt = task_deadline.strftime("%d.%m.%Y %H:%M")
-                        is_expired = task_deadline < now
-                        
-                        desc = clean_html(desc_raw)
-                        url = url_raw
-                        
-                        # Если это таска, которую только что изменили — показываем "Было -> Стало"
-                        if t_id == changed_id:
-                            text += "🔄 "
-                            if field == "description":
-                                text += f"• <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>"
-                            else:
-                                text += f"• {desc}"
-                                
-                            if field == "deadline":
-                                text += f" (сроки: <s>{old_dead}</s> ➡️ <code>{dt}</code>)"
-                            else:
-                                text += f" (до <code>{dt}</code>)"
-                                
-                            if field == "submit_url":
-                                if str(url).startswith("http"):
-                                    text += f" — сдача: <s>{clean_html(old_url)}</s> ➡️ <a href='{url}'>Ссылка</a>\n"
-                                else:
-                                    text += f" — сдача: <s>{clean_html(old_url)}</s> ➡️ {clean_html(url)}\n"
+            for task in subj_tasks:
+                try:
+                    t_id = task['id']
+                    desc = clean_html(task['description'])
+                    dead_raw = task['deadline']
+                    url = task['submit_url']
+                    
+                    task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
+                    dt = task_deadline.strftime("%d.%m.%Y %H:%M")
+                    is_expired = task_deadline < now
+                    
+                    if t_id == changed_id:
+                        text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
+                        if field == "description":
+                            text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
                         else:
-                            # Стандартный вывод для остальных строк
-                            if is_expired:
-                                if str(url).startswith("http"):
-                                    text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
-                                else:
-                                    text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
+                            text += f"📝 <b>Что сделать:</b> {desc}\n"
+                            
+                        if field == "deadline":
+                            text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
+                        else:
+                            text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
+                            
+                        if field == "submit_url":
+                            if str(url).startswith("http"):
+                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ <a href='{url}'>Ссылка</a>\n"
                             else:
-                                if str(url).startswith("http"):
-                                    text += f"🔸 • {desc} (до <code>{dt}</code>) — <a href='{url}'>Ссылка</a>\n"
-                                else:
-                                    text += f"🔸 • {desc} (до <code>{dt}</code>) — {clean_html(url)}\n"
-                    except Exception as e:
-                        logging.error(f"Ошибка правок закрепа: {e}")
-                        
-                text += "\n"
-                
-        try:
-            await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception as e:
-            logging.error(f"Ошибка правок закрепа: {e}")
+                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ {clean_html(url)}\n"
+                        else:
+                            if str(url).startswith("http"):
+                                text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
+                            else:
+                                text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
+                    else:
+                        if is_expired:
+                            text += f"❌ <b>(ДЕДЛАЙН ПРОШЕЛ)</b>\n"
+                            text += f"📝 <s><b>Что сделать:</b> {desc}</s>\n"
+                            text += f"⏰ <s><b>Сдать до:</b> {dt}</s>\n"
+                            if str(url).startswith("http"):
+                                text += f"📥 <s><b>Куда сдавать:</b> <a href='{url}'>Ссылка</a></s>\n"
+                            else:
+                                text += f"📥 <s><b>Куда сдавать:</b> {clean_html(url)}</s>\n"
+                        else:
+                            text += f"🔸 📝 <b>Что сделать:</b> {desc}\n"
+                            text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
+                            if str(url).startswith("http"):
+                                text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
+                            else:
+                                text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
+                                
+                    text += "• • • • • • • • • • • • • •\n"
+                except Exception as e:
+                    logging.error(f"Ошибка правок закрепа: {e}")
+                    
+            text += "\n"
+            
+    try:
+        await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        logging.error(f"Ошибка правок закрепа: {e}")
 
 
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
