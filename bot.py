@@ -66,7 +66,7 @@ class Form(StatesGroup):
     subject = State()
     description = State()
     deadline = State()
-    submit_url = State()
+    select_email = State()  # Для выбора между m_selin и olesyuk
     file = State()
 
 class EditForm(StatesGroup):    # <-- Вот этот класс обязательно должен быть здесь!
@@ -492,17 +492,53 @@ async def process_desc(message: Message, state: FSMContext):
 @router.message(Form.deadline)
 async def process_deadline(message: Message, state: FSMContext):
     try:
+        # Проверяем и сохраняем дату
         dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
         await state.update_data(deadline=dt.strftime("%Y-%m-%d %H:%M"))
-        await message.answer("Укажи, куда отправлять работу (ссылку или любой текст, например: на почту / в ЛС старосте):")
-        await state.set_state(Form.submit_url)
+        
+        user_data = await state.get_data()
+        subj = user_data['subject']
+        
+        # Автоматическая логика контактов в зависимости от предмета
+        if 'Биоинформатика' in subj:
+            await state.update_data(submit_url="Телеграмм - @KateChernyaeva")
+            await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+            await state.set_state(Form.file)
+            
+        elif 'Биостатистика' in subj:
+            await state.update_data(submit_url="отправят форму для дз позже")
+            await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+            await state.set_state(Form.file)
+            
+        elif 'Молекулярная эволюция' in subj:
+            await state.update_data(submit_url="dmitrii.lv.konovalov@gmail.com")
+            await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+            await state.set_state(Form.file)
+            
+        elif 'Генетические основы' in subj:
+            # Для селекции создаем кнопки выбора почты преподавателя
+            kb_emails = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📧 m_selin@mail.ru", callback_data="mail_selin")],
+                [InlineKeyboardButton(text="📧 olesyuk@rgau-msha.ru", callback_data="mail_olesyuk")]
+            ])
+            await message.answer("Выбери, на какую почту нужно отправить это задание:", reply_markup=kb_emails)
+            await state.set_state(Form.select_email)
+            
     except ValueError:
         await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
 
-@router.message(Form.submit_url)
-async def process_url(message: Message, state: FSMContext):
-    await state.update_data(submit_url=message.text)
-    await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+
+# Обработка выбора почты для Генетических основ селекции
+@router.callback_query(Form.select_email)
+async def process_selection_email(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    if callback.data == "mail_selin":
+        await state.update_data(submit_url="m_selin@mail.ru")
+    elif callback.data == "mail_olesyuk":
+        await state.update_data(submit_url="olesyuk@rgau-msha.ru")
+        
+    await callback.message.answer("Почта выбрана! Теперь прикрепи файл к этому дедлайну или напиши словом 'нет', если файла нет:")
     await state.set_state(Form.file)
 
 @router.message(Form.file)
