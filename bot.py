@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.enums import ParseMode
 from aiohttp import web
 import asyncpg
+import urllib.parse 
 
 # --- НАСТРОЙКИ TELEGRAM БОТА ---
 BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
