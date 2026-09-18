@@ -184,9 +184,9 @@ async def update_pinned_post():
             for task in subj_tasks:
 
                 try:
-                    desc_raw = task[0]
-                    dead_raw = task[1]
-                    url_raw = task[2]
+                    desc_raw = task['description']
+                    dead_raw = task['deadline']
+                    url_raw = task['submit_url']
                     task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
                     dt = task_deadline.strftime("%d.%m.%Y %H:%M")
                     is_expired = task_deadline < now
@@ -200,6 +200,7 @@ async def update_pinned_post():
                             text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
                         else:
                             text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
+
 
                     else:
                         # Если актуально — выводим красиво
@@ -232,11 +233,11 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
         now = datetime.now()
         for task in all_tasks:
             try:
-                t_id = task[0]
-                subj_raw = task[1]
-                desc_raw = task[2]
-                dead_raw = task[3]
-                url_raw = task[4]
+                t_id = task['id']
+                subj_raw = task['subject']
+                desc_raw = task['description']
+                dead_raw = task['deadline']
+                url_raw = task['submit_url']
                 task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
                 dt = task_deadline.strftime("%d.%m.%Y %H:%M")
                 is_expired = task_deadline < now
@@ -271,9 +272,10 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                          # Стандартный вывод для остальных строк
                     if is_expired:
                         if str(url).startswith("http"):
-                            text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
+                            text += f"❌ <s><b>Предмет:</b> {subj}\n<b>Что сделать:</b> {desc}\n<b>Сдать до:</b> {dt}</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
                         else:
-                            text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
+                            text += f"❌ <s><b>Предмет:</b> {subj}\n<b>Что сделать:</b> {desc}\n<b>Сдать до:</b> {dt}</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
+
 
                     else:
                         if str(url).startswith("http"):
