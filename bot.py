@@ -301,9 +301,11 @@ async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Введите НОВОЕ описание домашнего задания:")
     elif callback.data == "change_date":
         await state.update_data(edit_field="deadline")
-        await callback.message.answer("Введите НОВЫЙ дедлайн в формате (ДД.ММ.ГГГГ ЧЧ:ММ):")
+        await callback.message.answer("Введите НОВЫЙ дедлайн (ДД.ММ.ГГГГ ЧЧ:ММ):")
+    elif callback.data == "change_url":
+        await state.update_data(edit_field="submit_url")
+        await callback.message.answer("Укажите НОВОЕ место сдачи (ссылку, почту или Telegram):")
     await state.set_state(EditForm.new_value)
-
 # Логика автоматического редактирования старого поста в самом канале
 @router.message(EditForm.new_value)
 async def process_edit_save(message: Message, state: FSMContext):
@@ -320,7 +322,7 @@ async def process_edit_save(message: Message, state: FSMContext):
         await state.clear()
         return
         
-    subj, old_desc, old_dead, url_val, msg_id = old_task
+    subj, old_desc, old_dead, old_url, msg_id = old_task
     
     if field == "deadline":
         try:
@@ -330,18 +332,19 @@ async def process_edit_save(message: Message, state: FSMContext):
             await message.answer("Неверный формат! Введите ДД.ММ.ГГГГ ЧЧ:ММ:")
             return
 
-    # Записываем изменения в базу данных
+    # Записываем изменения в базу данных в зависимости от выбранного поля
     if field == "deadline":
         cursor.execute("UPDATE tasks SET deadline = ?, notified = 0 WHERE id = ?", (new_text, task_id))
-        final_dead = new_text
-        final_desc = old_desc
-    else:
+        final_dead, final_desc, final_url = new_text, old_desc, old_url
+    elif field == "description":
         cursor.execute("UPDATE tasks SET description = ? WHERE id = ?", (new_text, task_id))
-        final_dead = old_dead
-        final_desc = new_text
+        final_dead, final_desc, final_url = old_dead, new_text, old_url
+    elif field == "submit_url":
+        cursor.execute("UPDATE tasks SET submit_url = ? WHERE id = ?", (new_text, task_id))
+        final_dead, final_desc, final_url = old_dead, old_desc, new_text
     conn.commit()
     
-    # Форматируем даты для красивого текста правок
+    # Форматируем даты для красивого отображения изменений
     dt_old_format = datetime.strptime(old_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
     dt_new_format = datetime.strptime(final_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
     
@@ -350,26 +353,30 @@ async def process_edit_save(message: Message, state: FSMContext):
     elif "Генетические основы" in subj: hashtag = "#селекция"
     else: hashtag = "#биоинформатика"
 
-    # Конструируем измененный текст поста с зачеркиванием старых данных
+    # Собираем измененный текст поста
     edited_post_text = f"🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО</b> {hashtag}\n\n📘 <b>Предмет:</b> {clean_html(subj)}\n"
     
     if field == "description":
         edited_post_text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
     else:
-        edited_post_text += f"📝 <b>Что сделать:</b> {clean_html(old_desc)}\n"
+        edited_post_text += f"📝 <b>Что сделать:</b> {clean_html(final_desc)}\n"
         
     if field == "deadline":
         edited_post_text += f"⏰ <b>Сдать до:</b> <s>{dt_old_format}</s> ➡️ <code>{dt_new_format}</code>\n"
     else:
         edited_post_text += f"⏰ <b>Сдать до:</b> <code>{dt_new_format}</code>\n"
 
+    # Настраиваем блок сдачи (кнопка или текст)
     kb = None
-    if str(url_val).startswith("http"):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
+    if str(final_url).startswith("http"):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=final_url)]])
     else:
-        edited_post_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_val)}\n"
+        if field == "submit_url":
+            edited_post_text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
+        else:
+            edited_post_text += f"📥 <b>Куда сдавать:</b> {clean_html(final_url)}\n"
 
-    # Принудительно заменяем текст старого оригинального сообщения в ленте канала
+    # Редактируем старый оригинальный пост в ленте канала
     if msg_id and msg_id != 0:
         try:
             await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=edited_post_text, reply_markup=kb, parse_mode=ParseMode.HTML)
