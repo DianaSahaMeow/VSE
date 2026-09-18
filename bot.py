@@ -742,11 +742,12 @@ async def process_deadline(message: Message, state: FSMContext):
             await state.set_state(Form.file)
             
         elif 'Генетические основы' in subj:
-            # Для селекции создаем кнопки выбора почты преподавателя
+            # Для селекции создаем кнопки выбора почты преподавателя с защитой от разметки
             kb_emails = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📧 m_selin@mail.ru", callback_data="mail_selin")],
                 [InlineKeyboardButton(text="📧 olesyuk@rgau-msha.ru", callback_data="mail_olesyuk")]
             ])
+
             await message.answer("Выбери, на какую почту нужно отправить это задание:", reply_markup=kb_emails)
             await state.set_state(Form.select_email)
             
@@ -806,7 +807,8 @@ async def process_file(message: Message, state: FSMContext):
     if str(url_val).startswith("http"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
     else:
-        new_task_text += f"📥 <b>Куда сдавать:</b> {str(url_val).replace('_', '\\_').replace('*', '\\*')}\n"
+        new_task_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_val)}\n"
+
     
     posted_message_id = 0
     try:
