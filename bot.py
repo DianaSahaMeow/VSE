@@ -716,8 +716,12 @@ async def main():
         host=DB_HOST,
         port=DB_PORT,
         database=DB_NAME,
-        ssl="require"
+        ssl="require",
+        server_settings={
+            "application_name": "://supabase.com"
+        }
     )
+
     # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=15)
     scheduler.add_job(update_pinned_post, 'interval', minutes=15)
