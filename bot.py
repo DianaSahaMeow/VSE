@@ -11,12 +11,15 @@ from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.enums import ParseMode
 from aiohttp import web
+import asyncpg
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
 CHANNEL_ID = -1004330638807  # ID канала с -100
 ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
+
+DB_URI = "postgresql://postgres:[/-s56B3sbWw+L&L]@db.tqpaoezbovvanysghfvl.supabase.co:5432/postgres"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -44,24 +47,7 @@ pin_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# --- БАЗА ДАННЫХ ---
-# --- БАЗА ДАННЫХ ---
-conn = sqlite3.connect("deadlines.db")
-cursor = conn.cursor()
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        subject TEXT,
-        description TEXT,
-        deadline TEXT,
-        submit_url TEXT,
-        file_id TEXT,
-        notified INTEGER DEFAULT 0,
-        message_id INTEGER DEFAULT 0,
-        edit_message_ids TEXT DEFAULT ''  # <-- Добавили поле для хранения ID всех постов-обновлений
-    )
-''')
-conn.commit()
+
 
 
 # --- СОСТОЯНИЯ ДЛЯ ПОШАГОВОГО ОПРОСА ---
