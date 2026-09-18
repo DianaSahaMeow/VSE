@@ -26,6 +26,15 @@ dp = Dispatcher()
 router = Router()
 scheduler = AsyncIOScheduler() 
 
+# --- ГЛАВНАЯ КЛАВИАТУРА СТАРОСТЫ ---
+admin_main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text='➕ Добавить дедлайн')],
+        [KeyboardButton(text='🗂 Управление'), KeyboardButton(text='📢 Важное объявление')]
+    ],
+    resize_keyboard=True  # Делает кнопки аккуратными и маленькими
+)
+
 # --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ ---
 subjects_keyboard = ReplyKeyboardMarkup(
     keyboard=[
@@ -66,6 +75,74 @@ class EditForm(StatesGroup):    # <-- Вот этот класс обязате�
 class NoticeForm(StatesGroup):
     text = State()
     pin = State()
+    
+# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (С СОРТИРОВКОЙ ПО ПРЕДМЕТАМ ПОД SUPABASE) ---
+async def update_pinned_post():
+    # Открываем асинхронное подключение из пула Supabase
+    async with db_pool.acquire() as conn:
+        # Сначала берем список всех уникальных предметов, которые есть в базе
+        unique_subjects_rows = await conn.fetch("SELECT DISTINCT subject FROM tasks")
+        unique_subjects = [row['subject'] for row in unique_subjects_rows]
+        
+        text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
+        
+        if not unique_subjects:
+            text += "Ура! Активных заданий нет 🎉"
+        else:
+            now = datetime.now()
+            
+            # Перебираем каждый предмет отдельно
+            for subj_name in unique_subjects:
+                # Определяем глобальный хештег для заголовка предмета
+                if "Биостатистика" in subj_name: hashtag = "#биостатистика"
+                elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
+                elif "Генетические основы" in subj_name: hashtag = "#селекция"
+                else: hashtag = "#биоинформатика"
+                
+                # Добавляем красивую шапку предмета
+                text += f"📘 <b>{clean_html(subj_name)}</b> {hashtag}\n"
+                text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+                
+                # Вытаскиваем задания по этому предмету, сортируя их по дедлайну
+                subj_tasks = await conn.fetch("SELECT description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
+                
+                for task in subj_tasks:
+                    try:
+                        desc_raw = task['description']
+                        dead_raw = task['deadline']
+                        url_raw = task['submit_url']
+                        
+                        task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
+                        dt = task_deadline.strftime("%d.%m.%Y %H:%M")
+                        is_expired = task_deadline < now
+                        
+                        desc = clean_html(desc_raw)
+                        url = url_raw
+                        
+                        if is_expired:
+                            # Если дедлайн прошел — зачеркиваем и дописываем статус
+                            if str(url).startswith("http"):
+                                text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
+                            else:
+                                text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
+                        else:
+                            # Если актуально — выводим красиво
+                            if str(url).startswith("http"):
+                                text += f"🔸 • {desc} (до <code>{dt}</code>) — <a href='{url}'>Ссылка</a>\n"
+                            else:
+                                text += f"🔸 • {desc} (до <code>{dt}</code>) — {clean_html(url)}\n"
+                    except Exception as e:
+                        logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
+                        
+                text += "\n" # Отступ между блоками разных предметов
+                
+        try:
+            await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            if "message is not modified" in str(e):
+                logging.info("Закрепленный пост проверен: изменений нет.")
+            else:
+                logging.error(f"Ошибка обновления закрепа: {e}")
 
 
 # Вспомогательная функция для безопасного текста в HTML
@@ -97,6 +174,7 @@ async def clear_old_deadlines():
         await update_pinned_post()
 # --- ДИАЛОГ ДЛЯ ВАЖНЫХ ОБЪЯВЛЕНИЙ ---
 @router.message(Command("alert"), F.from_user.id == ADMIN_ID)
+@router.message(F.text == '📢 Важное объявление', F.from_user.id == ADMIN_ID)
 async def start_notice(message: Message, state: FSMContext):
     await message.answer("📢 Введи текст важного объявления (можно использовать абзацы):")
     await state.set_state(NoticeForm.text)
@@ -138,74 +216,6 @@ async def process_notice_pin(message: Message, state: FSMContext):
         
     await state.clear()
 #пароль 3-430dsQ
-# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (С СОРТИРОВКОЙ ПО ПРЕДМЕТАМ) ---
-async def update_pinned_post():
-    # Сначала берем список всех уникальных предметов, которые есть в базе
-    cursor.execute("SELECT DISTINCT subject FROM tasks")
-    unique_subjects = [row[0] for row in cursor.fetchall()]
-    
-    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-    
-    if not unique_subjects:
-        text += "Ура! Активных заданий нет 🎉"
-    else:
-        now = datetime.now()
-        
-        # Перебираем каждый предмет отдельно
-        for subj_name in unique_subjects:
-            # Определяем глобальный хештег для заголовка предмета
-            if "Биостатистика" in subj_name: hashtag = "#биостатистика"
-            elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
-            elif "Генетические основы" in subj_name: hashtag = "#селекция"
-            else: hashtag = "#биоинформатика"
-            
-            # Добавляем красивую шапку предмета
-            text += f"📘 <b>{clean_html(subj_name)}</b> {hashtag}\n"
-            text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
-            
-            # Вытаскиваем все задания КОНКРЕТНО по этому предмету, сортируя их по дате дедлайна
-            cursor.execute("SELECT description, deadline, submit_url FROM tasks WHERE subject = ? ORDER BY deadline ASC", (subj_name,))
-            subj_tasks = cursor.fetchall()
-            
-            for task in subj_tasks:
-
-                try:
-                    desc_raw = task['description']
-                    dead_raw = task['deadline']
-                    url_raw = task['submit_url']
-                    task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
-                    dt = task_deadline.strftime("%d.%m.%Y %H:%M")
-                    is_expired = task_deadline < now
-                    
-                    desc = clean_html(desc_raw)
-                    url = url_raw
-                    
-                    if is_expired:
-                        # Если дедлайн прошел — зачеркиваем и дописываем статус
-                        if str(url).startswith("http"):
-                            text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s><a href='{url}'>Ссылка</a></s>\n"
-                        else:
-                            text += f"❌ <s>• {desc} (до {dt})</s> <i>(дедлайн прошел)</i> — <s>{clean_html(url)}</s>\n"
-
-
-                    else:
-                        # Если актуально — выводим красиво
-                        if str(url).startswith("http"):
-                            text += f"🔸 • {desc} (до <code>{dt}</code>) — <a href='{url}'>Ссылка</a>\n"
-                        else:
-                            text += f"🔸 • {desc} (до <code>{dt}</code>) — {clean_html(url)}\n"
-                except Exception as e:
-                    logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
-                    
-            text += "\n" # Отступ между блоками разных предметов
-            
-    try:
-        await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except Exception as e:
-        if "message is not modified" in str(e):
-            logging.info("Закрепленный пост проверен: изменений нет.")
-        else:
-            logging.error(f"Ошибка обновления закрепа: {e}")
 
 # Специальное обновление закрепа, отображающее перечеркнутые правки
 async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
@@ -320,6 +330,7 @@ async def check_24h_reminders():
 
 # --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ (УДАЛЕНИЕ И ИЗМЕНЕНИЕ) ---
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
+@router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
 async def manage_tasks(message: Message):
     cursor.execute("SELECT id, subject, deadline FROM tasks ORDER BY deadline ASC")
     tasks = cursor.fetchall()
@@ -501,13 +512,22 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Что именно вы хотите изменить в этом задании?", reply_markup=kb)
     await state.set_state(EditForm.choice)
 
-# Обработка выбора (дата или описание)
 
+
+# --- ПРИВЕТСТВИЕ И АКТИВАЦИЯ КНОПОК ---
+@router.message(Command("start"), F.from_user.id == ADMIN_ID)
+async def cmd_start(message: Message):
+    await message.answer(
+        "👋 Привет, староста! Рад приветствовать тебя в панели управления группой.\n\n"
+        "✨ Лови меню быстрых кнопок внизу экрана!", 
+        reply_markup=admin_main_keyboard
+    )
 
 
 
 # --- ДИАЛОГ СО СТАРОСТОЙ (ДОБАВЛЕНИЕ) ---
 @router.message(Command("add"), F.from_user.id == ADMIN_ID)
+@router.message(F.text == '➕ Добавить дедлайн', F.from_user.id == ADMIN_ID)
 async def start_add(message: Message, state: FSMContext):
     await message.answer("Выбери название предмета из списка:", reply_markup=subjects_keyboard)
     await state.set_state(Form.subject)
