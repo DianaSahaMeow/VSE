@@ -132,7 +132,7 @@ async def process_notice_pin(message: Message, state: FSMContext):
         f"\n"
         f"{notice_text}\n"
         f"\n"
-        f"👥 @everyone | Просьба ознакомиться!"
+        f"Просьба ознакомиться!"
     )
     
     try:
