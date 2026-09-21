@@ -115,9 +115,7 @@ async def update_pinned_post():
             # Шапка предмета
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
             text += f"\n"
-            
-            subj_tasks = await conn.fetch("SELECT description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
-            
+            subj_tasks = await conn.fetch("SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
             # Если по предмету вообще нет никаких заданий в базе данных
             if not subj_tasks:
                 text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
@@ -130,6 +128,7 @@ async def update_pinned_post():
                     desc = clean_html(task['description'])
                     dead_raw = task['deadline']
                     url = task['submit_url']
+                    msg_id = task['message_id']
                     
                     task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
                     dt = task_deadline.strftime("%d.%m.%Y %H:%M")
@@ -153,7 +152,9 @@ async def update_pinned_post():
                         else:
                             text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
                             
-                    text += f"— — — — — — — — — — — — — —\n"
+                        if msg_id and msg_id != 0:
+                            text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
+                        text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
 
@@ -171,6 +172,14 @@ async def update_pinned_post():
 # Вспомогательная функция для безопасного текста в HTML
 def clean_html(text):
     return str(text).replace("<", "&lt;").replace(">", "&gt;")
+
+# Внутренний ID канала для построения ссылок на сообщения
+CHANNEL_INTERNAL_ID = str(CHANNEL_ID).replace("-100", "")  # "4330638807"
+
+def task_link(message_id: int) -> str:
+    """Возвращает ссылку на исходное сообщение задания в канале."""
+    return f"https://t.me/c/{CHANNEL_INTERNAL_ID}/{message_id}"
+
 # --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ---
 # --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ПОСЛЕ ДЕДЛАЙНА ---
 async def clear_old_deadlines():
@@ -267,8 +276,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
             text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
             text += f"\n"
             
-            subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
-            
+            subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
             if not subj_tasks:
                 text += f"🔸 📝 <b>What сделать:</b> Активных заданий нет 🎉\n"
                 text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
@@ -281,6 +289,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                     desc = clean_html(task['description'])
                     dead_raw = task['deadline']
                     url = task['submit_url']
+                    msg_id = task['message_id']
                     
                     task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
                     dt = task_deadline.strftime("%d.%m.%Y %H:%M")
@@ -325,6 +334,8 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                             else:
                                 text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
                                 
+                    if msg_id and msg_id != 0:
+                        text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
                     text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка правок закрепа: {e}")
@@ -347,7 +358,7 @@ async def check_24h_reminders():
     
     async with db_pool.acquire() as conn:
         reminders = await conn.fetch(
-            "SELECT id, subject, description, deadline, submit_url, file_id FROM tasks WHERE deadline BETWEEN $1 AND $2 AND notified = 0", 
+            "SELECT id, subject, description, deadline, submit_url, file_id, message_id FROM tasks WHERE deadline BETWEEN $1 AND $2 AND notified = 0", 
             target_time_start, target_time_end
         )
         
@@ -367,6 +378,11 @@ async def check_24h_reminders():
                 kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=task['submit_url'])]])
             else:
                 alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(task['submit_url'])}\n"
+
+            # Ссылка на исходный пост с файлом
+            msg_id = task['message_id']
+            if msg_id and msg_id != 0:
+                alert_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Открыть исходное задание</a>\n"
             
             try:
                 if task['file_id']:
@@ -481,13 +497,11 @@ async def cleanup_lesson_reminders():
                     row['id']
                 )
 
-
-# --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ ДЛЯ SUPABASE ---
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
 async def manage_tasks(message: Message):
     async with db_pool.acquire() as conn:
-        tasks = await conn.fetch("SELECT id, subject, deadline FROM tasks ORDER BY deadline ASC")
+        tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
         
         if not tasks:
             await message.answer("В базе данных пока нет заданий.")
@@ -496,20 +510,34 @@ async def manage_tasks(message: Message):
         await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:")
         
         for t in tasks:
-            t_id, subj, dead = t['id'], t['subject'], t['deadline']
+            t_id = t['id']
+            subj = t['subject']
+            dead = t['deadline']
+            msg_id = t['message_id']
+            
             try:
                 dt = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
             except Exception:
                 dt = dead
             
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
-                    InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
-                ]
+            # Верхний ряд — кнопка «Перейти к посту» (только если есть message_id)
+            rows = []
+            if msg_id and msg_id != 0:
+                rows.append([
+                    InlineKeyboardButton(text="📎 Перейти к посту", url=task_link(msg_id))
+                ])
+            # Нижний ряд — изменить / удалить
+            rows.append([
+                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
             ])
-            await message.answer(f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}", reply_markup=kb, parse_mode=ParseMode.HTML)
-
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+            await message.answer(
+                f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}",
+                reply_markup=kb,
+                parse_mode=ParseMode.HTML
+            )
 # Удаление поста, закрепа и всей цепочки промежуточных уведомлений об изменениях (Supabase)
 @router.callback_query(F.data.startswith("del_"))
 async def delete_task_callback(callback: CallbackQuery):
@@ -936,4 +964,3 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
-
