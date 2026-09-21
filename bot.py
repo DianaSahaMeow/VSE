@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.enums import ParseMode
 from aiohttp import web
-
+from aiogram.filters import Command, StateFilter
 
 import asyncpg
 import urllib.parse
@@ -756,7 +756,7 @@ async def process_deadline(message: Message, state: FSMContext):
 
 
 # Обработка выбора почты для Генетических основ селекции
-@router.callback_query(Form.select_email)
+@router.callback_query(StateFilter(Form.select_email))
 async def process_selection_email(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     
@@ -929,6 +929,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     # Запускаем чтение сообщений Telegram
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
