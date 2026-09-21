@@ -151,10 +151,11 @@ async def update_pinned_post():
                             text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
                         else:
                             text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
-                            
-                        if msg_id and msg_id != 0:
-                            text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
-                        text += f"— — — — — — — — — — — — — —\n"
+                    
+                    # Ссылка на исходный пост — для ВСЕХ задач (и активных, и просроченных)
+                    if msg_id and msg_id != 0:
+                        text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
+                    text += f"— — — — — — — — — — — — — —\n"
                 except Exception as e:
                     logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
 
