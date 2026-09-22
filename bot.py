@@ -38,7 +38,7 @@ DB_NAME = "postgres"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
-scheduler = AsyncIOScheduler() 
+scheduler = AsyncIOScheduler(timezone=MSK)
 db_pool = None  # <-- ДОБАВЬТЕ ЭТУ СТРОКУ!
 
 
@@ -103,7 +103,7 @@ async def update_pinned_post():
     ]
     
     text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-    now = datetime.now()
+    now = now_msk()
     
     async with db_pool.acquire() as conn:
         for subj_name in all_possible_subjects:
@@ -185,8 +185,7 @@ def task_link(message_id: int) -> str:
 # --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ПОСЛЕ ДЕДЛАЙНА ---
 async def clear_old_deadlines():
     # Рассчитываем временную метку: текущее время минус 14 дней
-    two_weeks_ago = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
-    
+    two_weeks_ago = (now_msk() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
     # Открываем коннект к Supabase
     async with db_pool.acquire() as conn:
         old_tasks = await conn.fetch("SELECT id, message_id FROM tasks WHERE deadline < $1", two_weeks_ago)
@@ -265,7 +264,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
     ]
     
     text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-    now = datetime.now()
+    now = now_msk() 
     
     async with db_pool.acquire() as conn:
         for subj_name in all_possible_subjects:
@@ -353,13 +352,15 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ПОД SUPABASE ---
 async def check_24h_reminders():
-    now = datetime.now()
-    target_time_start = (now + timedelta(hours=23, minutes=30)).strftime("%Y-%m-%d %H:%M")
-    target_time_end = (now + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+    now = now_msk()  # используем МСК, как и в расписании
+    # окно: от 23:55 до 24:05 — 10 минут, чтобы точно попасть при запуске каждые 5 мин
+    target_time_start = (now + timedelta(hours=23, minutes=55)).strftime("%Y-%m-%d %H:%M")
+    target_time_end   = (now + timedelta(hours=24, minutes=5)).strftime("%Y-%m-%d %H:%M")
     
     async with db_pool.acquire() as conn:
         reminders = await conn.fetch(
-            "SELECT id, subject, description, deadline, submit_url, file_id, message_id FROM tasks WHERE deadline BETWEEN $1 AND $2 AND notified = 0", 
+            "SELECT id, subject, description, deadline, submit_url, file_id, message_id "
+            "FROM tasks WHERE deadline BETWEEN $1 AND $2 AND notified = 0",
             target_time_start, target_time_end
         )
         
@@ -410,17 +411,19 @@ def get_hashtag_by_subject(subj: str) -> str:
 async def send_lesson_reminders():
     """За 10 минут до пары отправляет уведомление в канал."""
     now = now_msk()
+    today = now.date()
+    date_from = today - timedelta(days=1)
+    date_to   = today + timedelta(days=1)
 
     async with db_pool.acquire() as conn:
-        # Берём все пары за вчера/сегодня/завтра, по которым ещё не отправлено
         rows = await conn.fetch(
             """
             SELECT id, lesson_date, start_time, end_time, subject, kind, url
             FROM schedule
-            WHERE lesson_date BETWEEN CURRENT_DATE - INTERVAL '1 day'
-                                  AND CURRENT_DATE + INTERVAL '1 day'
+            WHERE lesson_date BETWEEN $1 AND $2
               AND notified = FALSE
-            """
+            """,
+            date_from, date_to
         )
 
         for row in rows:
@@ -617,6 +620,7 @@ async def process_edit_save(message: Message, state: FSMContext):
         if field == "deadline":
             try:
                 dt = datetime.strptime(new_text, "%d.%m.%Y %H:%M")
+                dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)   # явно МСК
                 new_text = dt.strftime("%Y-%m-%d %H:%M")
             except ValueError:
                 await message.answer("Неверный формат! Введите ДД.ММ.ГГГГ ЧЧ:ММ:")
@@ -749,6 +753,7 @@ async def process_deadline(message: Message, state: FSMContext):
     try:
         # Проверяем и сохраняем дату
         dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
+        dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)   # явно МСК
         await state.update_data(deadline=dt.strftime("%Y-%m-%d %H:%M"))
         
         user_data = await state.get_data()
@@ -942,6 +947,11 @@ async def main():
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
+    logging.info(
+        f"[TZ CHECK] now_msk={now_msk()} | utcnow={datetime.utcnow()} | "
+        f"delta={(now_msk() - datetime.utcnow()).total_seconds()/3600:.2f}ч | "
+        f"scheduler.tz={scheduler.timezone}"
+    )
     scheduler.start()
     
     await update_pinned_post()
