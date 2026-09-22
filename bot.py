@@ -756,7 +756,7 @@ async def process_deadline(message: Message, state: FSMContext):
         
         # Автоматическая логика контактов в зависимости от предмета
         if 'Биоинформатика' in subj:
-            await state.update_data(submit_url="Телеграмм - @KateChernyaeva")
+            await state.update_data(submit_url="Почта- echernyayeva@hse.ru ")
             await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
             await state.set_state(Form.file)
             
