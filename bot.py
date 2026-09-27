@@ -92,87 +92,13 @@ class NoticeForm(StatesGroup):
     text = State()
     pin = State()
 
-# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (СТРУКТУРИРОВАННАЯ, С ПРОВЕРКОЙ НА ДОЛГИ) ---
-# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
-async def update_pinned_post():
-    all_possible_subjects = [
-        'Проектный семинар "Биоинформатика в агробиотехнологиях"',
-        'Биостатистика',
-        'Молекулярная эволюция',
-        'Генетические основы селекционного процесса в растениеводстве и животноводстве'
-    ]
-    
-    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-    now = now_msk()
-    
-    async with db_pool.acquire() as conn:
-        for subj_name in all_possible_subjects:
-            if "Биостатистика" in subj_name: hashtag = "#биостатистика"
-            elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
-            elif "Генетические основы" in subj_name: hashtag = "#селекция"
-            else: hashtag = "#биоинформатика"
-            
-            # Шапка предмета
-            text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
-            text += f"\n"
-            subj_tasks = await conn.fetch("SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
-            # Если по предмету вообще нет никаких заданий в базе данных
-            if not subj_tasks:
-                text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
-                text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
-                continue
-                
-                        # Запускаем счетчик перед перебором задач предмета
-            for idx, task in enumerate(subj_tasks, start=1):
-                try:
-                    desc = clean_html(task['description'])
-                    dead_raw = task['deadline']
-                    url = task['submit_url']
-                    msg_id = task['message_id']
-                    
-                    task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
-                    dt = task_deadline.strftime("%d.%m.%Y %H:%M")
-                    is_expired = task_deadline < now
-                    
-                    if is_expired:
-                        # Если просрочено — аккуратно зачеркиваем внутренности
-                        text += f"❌ <b>(Дедлайн прошел)</b>\n"
-                        text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
-                        text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
-                        if str(url).startswith("http"):
-                            text += f"📥 <b>Куда сдавать:</b> <s><a href='{url}'>Ссылка</a></s>\n"
-                        else:
-                            text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(url)}</s>\n"
-                    else:
-                        # Структурированный вывод с цифрой по порядку
-                        text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
-                        text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
-                        if str(url).startswith("http"):
-                            text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
-                        else:
-                            text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
-                    
-                    # Ссылка на исходный пост — для ВСЕХ задач (и активных, и просроченных)
-                    if msg_id and msg_id != 0:
-                        text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
-                    text += f"— — — — — — — — — — — — — —\n"
-                except Exception as e:
-                    logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
+import re
 
-            text += "\n" # Отступ между блоками предметов
-            
-    try:
-        await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except Exception as e:
-        if "message is not modified" in str(e):
-            logging.info("Закрепленный пост проверен: изменений нет.")
-        else:
-            logging.error(f"Ошибка обновления закрепа: {e}")
-
-
-# Вспомогательная функция для безопасного текста в HTML
+# Вспомогательная функция для безопасного текста в HTML (Telegram требует экранировать &, <, >)
 def clean_html(text):
-    return str(text).replace("<", "&lt;").replace(">", "&gt;")
+    if text is None:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 # Внутренний ID канала для построения ссылок на сообщения
 CHANNEL_INTERNAL_ID = str(CHANNEL_ID).replace("-100", "")  # "4330638807"
@@ -181,32 +107,134 @@ def task_link(message_id: int) -> str:
     """Возвращает ссылку на исходное сообщение задания в канале."""
     return f"https://t.me/c/{CHANNEL_INTERNAL_ID}/{message_id}"
 
-# --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ---
+def format_submit_url(url: str, is_expired: bool = False) -> str:
+    """Форматирует строку сдачи (ссылка/почта/текст), аккуратно скрывая длинные ссылки."""
+    url_str = str(url or "").strip()
+    match = re.search(r'(https?://\S+)', url_str)
+    if match:
+        actual_url = match.group(1)
+        prefix = url_str[:match.start()].strip(" -:")
+        prefix_text = f"{clean_html(prefix)}: " if prefix else ""
+        link_html = f"<a href='{actual_url}'>Ссылка</a>"
+        content = f"{prefix_text}{link_html}"
+    else:
+        content = clean_html(url_str)
+        
+    if is_expired:
+        return f"📥 <b>Куда сдавать:</b> <s>{content}</s>\n"
+    else:
+        return f"📥 <b>Куда сдавать:</b> {content}\n"
+
+# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
+async def update_pinned_post():
+    try:
+        all_possible_subjects = [
+            'Проектный семинар "Биоинформатика в агробиотехнологиях"',
+            'Биостатистика',
+            'Молекулярная эволюция',
+            'Генетические основы селекционного процесса в растениеводстве и животноводстве'
+        ]
+        
+        text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
+        now = now_msk()
+        
+        async with db_pool.acquire() as conn:
+            # Получаем все предметы из базы, чтобы не потерять другие названия
+            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks")
+            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
+            subjects_to_display = all_possible_subjects + extra_subjects
+
+            for subj_name in subjects_to_display:
+                if "Биостатистика" in subj_name: hashtag = "#биостатистика"
+                elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
+                elif "Генетические основы" in subj_name: hashtag = "#селекция"
+                elif "Биоинформатика" in subj_name or "Проектный" in subj_name: hashtag = "#биоинформатика"
+                else: hashtag = "#дедлайн"
+                
+                # Шапка предмета
+                text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
+                subj_tasks = await conn.fetch("SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
+                # Если по предмету вообще нет никаких заданий в базе данных
+                if not subj_tasks:
+                    text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
+                    text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
+                    continue
+                    
+                # Запускаем счетчик перед перебором задач предмета
+                for idx, task in enumerate(subj_tasks, start=1):
+                    try:
+                        desc = clean_html(task['description'])
+                        dead_raw = task['deadline']
+                        url = task['submit_url']
+                        msg_id = task['message_id']
+                        
+                        task_deadline = datetime.strptime(dead_raw.strip(), "%Y-%m-%d %H:%M")
+                        dt = task_deadline.strftime("%d.%m.%Y %H:%M")
+                        is_expired = task_deadline < now
+                        
+                        if is_expired:
+                            # Если просрочено — аккуратно зачеркиваем внутренности
+                            text += f"❌ <b>(Дедлайн прошел)</b>\n"
+                            text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
+                            text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
+                            text += format_submit_url(url, is_expired=True)
+                        else:
+                            # Структурированный вывод с цифрой по порядку
+                            text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
+                            text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
+                            text += format_submit_url(url, is_expired=False)
+                        
+                        # Ссылка на исходный пост — для ВСЕХ задач (и активных, и просроченных)
+                        if msg_id and msg_id != 0:
+                            text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
+                        text += f"— — — — — — — — — — — — — —\n"
+                    except Exception as e:
+                        logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
+
+                text += "\n" # Отступ между блоками предметов
+                
+        # Защита от лимита сообщения Telegram (4096 символов)
+        if len(text) > 4090:
+            logging.warning(f"Закрепленный пост слишком длинный ({len(text)} символов), сокращаем...")
+            text = text[:4085] + "\n..."
+
+        try:
+            await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            if "message is not modified" in str(e):
+                logging.info("Закрепленный пост проверен: изменений нет.")
+            else:
+                logging.error(f"Ошибка обновления закрепа: {e}")
+    except Exception as e:
+        logging.error(f"Глобальная ошибка в update_pinned_post: {e}", exc_info=True)
+
 # --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ПОСЛЕ ДЕДЛАЙНА ---
 async def clear_old_deadlines():
-    # Рассчитываем временную метку: текущее время минус 14 дней
-    two_weeks_ago = (now_msk() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
-    # Открываем коннект к Supabase
-    async with db_pool.acquire() as conn:
-        old_tasks = await conn.fetch("SELECT id, message_id FROM tasks WHERE deadline < $1", two_weeks_ago)
-        
-        for task in old_tasks:
-            task_id = task['id']
-            msg_id = task['message_id']
+    try:
+        # Рассчитываем временную метку: текущее время минус 14 дней
+        two_weeks_ago = (now_msk() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
+        async with db_pool.acquire() as conn:
+            old_tasks = await conn.fetch("SELECT id, message_id FROM tasks WHERE deadline < $1", two_weeks_ago)
             
-            # Удаляем оригинальный пост из ленты канала
-            if msg_id and msg_id != 0:
-                try:
-                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
-                except Exception as e:
-                    logging.error(f"Не удалось автоматически удалить старый пост {msg_id}: {e}")
-                    
-            # Стираем запись из облачной базы данных
-            await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
-            
-        if old_tasks:
-            logging.info(f"Автоочистка архива: успешно удалено заданий: {len(old_tasks)}")
-            await update_pinned_post()
+            for task in old_tasks:
+                task_id = task['id']
+                msg_id = task['message_id']
+                
+                # Удаляем оригинальный пост из ленты канала
+                if msg_id and msg_id != 0:
+                    try:
+                        await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                    except Exception as e:
+                        logging.error(f"Не удалось автоматически удалить старый пост {msg_id}: {e}")
+                        
+                # Стираем запись из облачной базы данных
+                await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+                
+            if old_tasks:
+                logging.info(f"Автоочистка архива: успешно удалено заданий: {len(old_tasks)}")
+                await update_pinned_post()
+    except Exception as e:
+        logging.error(f"Ошибка в clear_old_deadlines: {e}", exc_info=True)
 
 
 # --- ДИАЛОГ ДЛЯ ВАЖНЫХ ОБЪЯВЛЕНИЙ ---
@@ -253,148 +281,166 @@ async def process_notice_pin(message: Message, state: FSMContext):
         
     await state.clear()
 #пароль 3-430dsQ
-# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ОТОБРАЖЕНИЕМ ПРАВОК В БЛОЧНОМ ВИДЕ ---
 # --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ИЗМЕНЕНИЯМИ (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
 async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
-    all_possible_subjects = [
-        'Проектный семинар "Биоинформатика в агробиотехнологиях"',
-        'Биостатистика',
-        'Молекулярная эволюция',
-        'Генетические основы селекционного процесса в растениеводстве и животноводстве'
-    ]
-    
-    text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-    now = now_msk() 
-    
-    async with db_pool.acquire() as conn:
-        for subj_name in all_possible_subjects:
-            if "Биостатистика" in subj_name: hashtag = "#биостатистика"
-            elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
-            elif "Генетические основы" in subj_name: hashtag = "#селекция"
-            else: hashtag = "#биоинформатика"
-            
-            text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n"
-            text += f"\n"
-            
-            subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
-            if not subj_tasks:
-                text += f"🔸 📝 <b>What сделать:</b> Активных заданий нет 🎉\n"
-                text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
-                continue
-                
-                        # Запускаем счетчик перед перебором задач предмета
-            for idx, task in enumerate(subj_tasks, start=1):
-                try:
-                    t_id = task['id']
-                    desc = clean_html(task['description'])
-                    dead_raw = task['deadline']
-                    url = task['submit_url']
-                    msg_id = task['message_id']
-                    
-                    task_deadline = datetime.strptime(dead_raw, "%Y-%m-%d %H:%M")
-                    dt = task_deadline.strftime("%d.%m.%Y %H:%M")
-                    is_expired = task_deadline < now
-                    
-                    if t_id == changed_id:
-                        text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
-                        if field == "description":
-                            text += f"{idx}. 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
-                        else:
-                            text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
-                            
-                        if field == "deadline":
-                            text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
-                        else:
-                            text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
-                            
-                        if field == "submit_url":
-                            if str(url).startswith("http"):
-                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ <a href='{url}'>Ссылка</a>\n"
-                            else:
-                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ {clean_html(url)}\n"
-                        else:
-                            if str(url).startswith("http"):
-                                text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
-                            else:
-                                text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
-                    else:
-                        if is_expired:
-                            text += f"❌ <b>(Дедлайн прошел)</b>\n"
-                            text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
-                            text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
-                            if str(url).startswith("http"):
-                                text += f"📥 <b>Куда сдавать:</b> <s><a href='{url}'>Ссылка</a></s>\n"
-                            else:
-                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(url)}</s>\n"
-                        else:
-                            text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
-                            text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
-                            if str(url).startswith("http"):
-                                text += f"📥 <b>Куда сдавать:</b> <a href='{url}'>Ссылка</a>\n"
-                            else:
-                                text += f"📥 <b>Куда сдавать:</b> {clean_html(url)}\n"
-                                
-                    if msg_id and msg_id != 0:
-                        text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
-                    text += f"— — — — — — — — — — — — — —\n"
-                except Exception as e:
-                    logging.error(f"Ошибка правок закрепа: {e}")
-
-                    
-            text += "\n"
-            
     try:
-        await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        all_possible_subjects = [
+            'Проектный семинар "Биоинформатика в агробиотехнологиях"',
+            'Биостатистика',
+            'Молекулярная эволюция',
+            'Генетические основы селекционного процесса в растениеводстве и животноводстве'
+        ]
+        
+        text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
+        now = now_msk() 
+        
+        async with db_pool.acquire() as conn:
+            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks")
+            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
+            subjects_to_display = all_possible_subjects + extra_subjects
+
+            for subj_name in subjects_to_display:
+                if "Биостатистика" in subj_name: hashtag = "#биостатистика"
+                elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
+                elif "Генетические основы" in subj_name: hashtag = "#селекция"
+                elif "Биоинформатика" in subj_name or "Проектный" in subj_name: hashtag = "#биоинформатика"
+                else: hashtag = "#дедлайн"
+                
+                text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
+                
+                subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
+                if not subj_tasks:
+                    text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
+                    text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
+                    continue
+                    
+                # Запускаем счетчик перед перебором задач предмета
+                for idx, task in enumerate(subj_tasks, start=1):
+                    try:
+                        t_id = task['id']
+                        desc = clean_html(task['description'])
+                        dead_raw = task['deadline']
+                        url = task['submit_url']
+                        msg_id = task['message_id']
+                        
+                        task_deadline = datetime.strptime(dead_raw.strip(), "%Y-%m-%d %H:%M")
+                        dt = task_deadline.strftime("%d.%m.%Y %H:%M")
+                        is_expired = task_deadline < now
+                        
+                        if t_id == changed_id:
+                            text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
+                            if field == "description":
+                                text += f"{idx}. 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
+                            else:
+                                text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
+                                
+                            if field == "deadline":
+                                text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
+                            else:
+                                text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
+                                
+                            if field == "submit_url":
+                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ {format_submit_url(url, is_expired=False).replace('📥 <b>Куда сдавать:</b> ', '')}"
+                            else:
+                                text += format_submit_url(url, is_expired=False)
+                        else:
+                            if is_expired:
+                                text += f"❌ <b>(Дедлайн прошел)</b>\n"
+                                text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
+                                text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
+                                text += format_submit_url(url, is_expired=True)
+                            else:
+                                text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
+                                text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
+                                text += format_submit_url(url, is_expired=False)
+                                    
+                        if msg_id and msg_id != 0:
+                            text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
+                        text += f"— — — — — — — — — — — — — —\n"
+                    except Exception as e:
+                        logging.error(f"Ошибка правок закрепа: {e}")
+
+                text += "\n"
+                
+        if len(text) > 4090:
+            text = text[:4085] + "\n..."
+            
+        try:
+            await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            if "message is not modified" in str(e):
+                logging.info("Закрепленный пост проверен: изменений нет.")
+            else:
+                logging.error(f"Ошибка правок закрепа: {e}")
     except Exception as e:
-        logging.error(f"Ошибка правок закрепа: {e}")
+        logging.error(f"Глобальная ошибка в update_pinned_post_with_change: {e}", exc_info=True)
 
 
-# --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ПОД SUPABASE ---
 async def check_24h_reminders():
-    now = now_msk()  # используем МСК, как и в расписании
-    # окно: от 23:55 до 24:05 — 10 минут, чтобы точно попасть при запуске каждые 5 мин
-    target_time_start = (now + timedelta(hours=23, minutes=55)).strftime("%Y-%m-%d %H:%M")
-    target_time_end   = (now + timedelta(hours=24, minutes=5)).strftime("%Y-%m-%d %H:%M")
-    
-    async with db_pool.acquire() as conn:
-        reminders = await conn.fetch(
-            "SELECT id, subject, description, deadline, submit_url, file_id, message_id "
-            "FROM tasks WHERE deadline BETWEEN $1 AND $2 AND notified = 0",
-            target_time_start, target_time_end
-        )
+    try:
+        now = now_msk()
+        deadline_threshold = (now + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+        now_str = now.strftime("%Y-%m-%d %H:%M")
         
-        for task in reminders:
-            task_id = task['id']
-            dt_format = datetime.strptime(task['deadline'], "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+        async with db_pool.acquire() as conn:
+            # 1. Помечаем уже прошедшие дедлайны как notified=1, чтобы не слать напоминания задним числом
+            await conn.execute("UPDATE tasks SET notified = 1 WHERE deadline <= $1 AND notified = 0", now_str)
             
-            alert_text = (
-                f"🚨 <b>ВНИМАНИЕ! дедлайн через 24 часа</b> 🚨\n\n"
-                f"📚 <b>Предмет:</b> {clean_html(task['subject'])}\n"
-                f"📝 <b>Что сдать:</b> {clean_html(task['description'])}\n"
-                f"🔥 <b>Время:</b> <code>{dt_format}</code>\n"
+            # 2. Выбираем ВСЕ задачи, дедлайн которых наступает в ближайшие 24 часа и уведомление еще не уходило
+            reminders = await conn.fetch(
+                """
+                SELECT id, subject, description, deadline, submit_url, file_id, message_id 
+                FROM tasks 
+                WHERE deadline <= $1 AND deadline > $2 AND notified = 0
+                ORDER BY deadline ASC
+                """,
+                deadline_threshold, now_str
             )
             
-            kb = None
-            if str(task['submit_url']).startswith("http"):
-                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=task['submit_url'])]])
-            else:
-                alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(task['submit_url'])}\n"
-
-            # Ссылка на исходный пост с файлом
-            msg_id = task['message_id']
-            if msg_id and msg_id != 0:
-                alert_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Открыть исходное задание</a>\n"
-            
-            try:
-                if task['file_id']:
-                    await bot.send_document(chat_id=CHANNEL_ID, document=task['file_id'], caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-                else:
-                    await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            for task in reminders:
+                task_id = task['id']
+                try:
+                    dt_format = datetime.strptime(task['deadline'].strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+                except Exception:
+                    dt_format = task['deadline']
                 
-                await conn.execute("UPDATE tasks SET notified = 1 WHERE id = $1", task_id)
-            except Exception as e:
-                logging.error(f"Не удалось отправить напоминание: {e}")
+                alert_text = (
+                    f"🚨 <b>ВНИМАНИЕ! дедлайн через 24 часа</b> 🚨\n\n"
+                    f"📚 <b>Предмет:</b> {clean_html(task['subject'])}\n"
+                    f"📝 <b>Что сдать:</b> {clean_html(task['description'])}\n"
+                    f"🔥 <b>Время:</b> <code>{dt_format}</code>\n"
+                )
+                
+                kb = None
+                url_str = str(task['submit_url'] or "").strip()
+                match = re.search(r'(https?://\S+)', url_str)
+                if match:
+                    actual_url = match.group(1)
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=actual_url)]])
+                    prefix = url_str[:match.start()].strip(" -:")
+                    if prefix:
+                        alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(prefix)}\n"
+                else:
+                    alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_str)}\n"
+
+                # Ссылка на исходный пост с файлом
+                msg_id = task['message_id']
+                if msg_id and msg_id != 0:
+                    alert_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Открыть исходное задание</a>\n"
+                
+                try:
+                    if task['file_id']:
+                        await bot.send_document(chat_id=CHANNEL_ID, document=task['file_id'], caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                    else:
+                        await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                    
+                    await conn.execute("UPDATE tasks SET notified = 1 WHERE id = $1", task_id)
+                    logging.info(f"Успешно отправлено напоминание за 24ч для таски {task_id}")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить напоминание для таски {task_id}: {e}")
+    except Exception as e:
+        logging.error(f"Глобальная ошибка в check_24h_reminders: {e}", exc_info=True)
 
 # --- УВЕДОМЛЕНИЯ О ПАРАХ ЗА 10 МИНУТ (РАСПИСАНИЕ ИЗ БД) ---
 def get_hashtag_by_subject(subj: str) -> str:
@@ -410,96 +456,102 @@ def get_hashtag_by_subject(subj: str) -> str:
 
 async def send_lesson_reminders():
     """За 10 минут до пары отправляет уведомление в канал."""
-    now = now_msk()
-    today = now.date()
-    date_from = today - timedelta(days=1)
-    date_to   = today + timedelta(days=1)
+    try:
+        now = now_msk()
+        today = now.date()
+        date_from = today - timedelta(days=1)
+        date_to   = today + timedelta(days=1)
 
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, lesson_date, start_time, end_time, subject, kind, url
-            FROM schedule
-            WHERE lesson_date BETWEEN $1 AND $2
-              AND notified = FALSE
-            """,
-            date_from, date_to
-        )
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, lesson_date, start_time, end_time, subject, kind, url
+                FROM schedule
+                WHERE lesson_date BETWEEN $1 AND $2
+                  AND notified = FALSE
+                """,
+                date_from, date_to
+            )
 
-        for row in rows:
-            try:
-                start_dt = datetime.strptime(
-                    f"{row['lesson_date']} {row['start_time']}",
-                    "%Y-%m-%d %H:%M"
-                )
-            except ValueError:
-                continue
-
-            diff_min = (start_dt - now).total_seconds() / 60
-
-            # Отправляем ровно в окне 9.5–10.5 минут до начала
-            if 9.5 <= diff_min <= 10.5:
-                subj = row['subject']
-                hashtag = get_hashtag_by_subject(subj)
-                text = (
-                    f"⏰ <b>Через 10 минут начнётся пара!</b>\n\n"
-                    f"📘 <b>Предмет:</b> {clean_html(subj)}\n"
-                    f"🎓 <b>Тип:</b> {row['kind']}\n"
-                    f"🕒 <b>Начало:</b> <code>{row['start_time']}</code> – <code>{row['end_time']}</code>\n"
-                    f"🔗 <b>Ссылка:</b> <a href='{row['url']}'>Телемост</a>\n\n"
-                    f"{hashtag}"
-                )
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🎥 Подключиться", url=row['url'])]
-                ])
+            for row in rows:
                 try:
-                    msg = await bot.send_message(
-                        chat_id=CHANNEL_ID, text=text,
-                        reply_markup=kb, parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True
+                    start_dt = datetime.strptime(
+                        f"{row['lesson_date']} {row['start_time']}",
+                        "%Y-%m-%d %H:%M"
                     )
-                    await conn.execute(
-                        "UPDATE schedule SET notified = TRUE, message_id = $1 WHERE id = $2",
-                        msg.message_id, row['id']
+                except ValueError:
+                    continue
+
+                diff_min = (start_dt - now).total_seconds() / 60
+
+                # Отправляем ровно в окне 9.5–10.5 минут до начала
+                if 9.5 <= diff_min <= 10.5:
+                    subj = row['subject']
+                    hashtag = get_hashtag_by_subject(subj)
+                    text = (
+                        f"⏰ <b>Через 10 минут начнётся пара!</b>\n\n"
+                        f"📘 <b>Предмет:</b> {clean_html(subj)}\n"
+                        f"🎓 <b>Тип:</b> {row['kind']}\n"
+                        f"🕒 <b>Начало:</b> <code>{row['start_time']}</code> – <code>{row['end_time']}</code>\n"
+                        f"🔗 <b>Ссылка:</b> <a href='{row['url']}'>Телемост</a>\n\n"
+                        f"{hashtag}"
                     )
-                    logging.info(f"Отправлено уведомление о паре: {subj} в {row['start_time']}")
-                except Exception as e:
-                    logging.error(f"Ошибка отправки уведомления о паре: {e}")
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🎥 Подключиться", url=row['url'])]
+                    ])
+                    try:
+                        msg = await bot.send_message(
+                            chat_id=CHANNEL_ID, text=text,
+                            reply_markup=kb, parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True
+                        )
+                        await conn.execute(
+                            "UPDATE schedule SET notified = TRUE, message_id = $1 WHERE id = $2",
+                            msg.message_id, row['id']
+                        )
+                        logging.info(f"Отправлено уведомление о паре: {subj} в {row['start_time']}")
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки уведомления о паре: {e}")
+    except Exception as e:
+        logging.error(f"Ошибка в send_lesson_reminders: {e}", exc_info=True)
 
 
 async def cleanup_lesson_reminders():
     """Удаляет уведомления, отправленные более 15 минут назад после начала пары."""
-    now = now_msk()
+    try:
+        now = now_msk()
 
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, lesson_date, start_time, message_id
-            FROM schedule
-            WHERE notified = TRUE AND message_id > 0
-            """
-        )
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, lesson_date, start_time, message_id
+                FROM schedule
+                WHERE notified = TRUE AND message_id > 0
+                """
+            )
 
-        for row in rows:
-            try:
-                start_dt = datetime.strptime(
-                    f"{row['lesson_date']} {row['start_time']}",
-                    "%Y-%m-%d %H:%M"
-                )
-            except ValueError:
-                continue
-
-            # Если с начала пары прошло больше 15 минут — удаляем сообщение
-            if (now - start_dt).total_seconds() > 15 * 60:
+            for row in rows:
                 try:
-                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
-                    logging.info(f"Удалено уведомление (msg_id={row['message_id']})")
-                except Exception as e:
-                    logging.error(f"Не удалось удалить уведомление {row['message_id']}: {e}")
-                await conn.execute(
-                    "UPDATE schedule SET message_id = 0 WHERE id = $1",
-                    row['id']
-                )
+                    start_dt = datetime.strptime(
+                        f"{row['lesson_date']} {row['start_time']}",
+                        "%Y-%m-%d %H:%M"
+                    )
+                except ValueError:
+                    continue
+
+                # Если с начала пары прошло больше 15 минут — удаляем сообщение
+                if (now - start_dt).total_seconds() > 15 * 60:
+                    try:
+                        await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
+                        logging.info(f"Удалено уведомление (msg_id={row['message_id']})")
+                    except Exception as e:
+                        logging.error(f"Не удалось удалить уведомление {row['message_id']}: {e}")
+                    await conn.execute(
+                        "UPDATE schedule SET message_id = 0 WHERE id = $1",
+                        row['id']
+                    )
+    except Exception as e:
+        logging.error(f"Ошибка в cleanup_lesson_reminders: {e}", exc_info=True)
 
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
@@ -699,6 +751,7 @@ async def process_edit_save(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✨ Изменения успешно сохранены! Оригинальный пост переписан, закреп обновлен, уведомление отправлено в канал.", reply_markup=admin_main_keyboard)
     await update_pinned_post_with_change(task_id, field, old_desc, dt_old_format, old_url)
+    await check_24h_reminders()
 
 # Нажатие на кнопку «Изменить» — выбор, что менять
 @router.callback_query(F.data.startswith("edit_"))
@@ -779,12 +832,16 @@ async def process_deadline(message: Message, state: FSMContext):
             # Для селекции создаем кнопки выбора почты преподавателя с защитой от разметки
             kb_emails = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📧 m_selin@mail.ru", callback_data="mail_selin")],
-                [InlineKeyboardButton(text="📧 olesyuk@rgau-msha.ru", callback_data="mail_olesyuk")],
-                [InlineKeyboardButton(text="📧 azagarin@rgau-msha.ru", callback_data="mail_azagarin")]
+                [InlineKeyboardButton(text="📧 olesyuk@rgau-msha.ru", callback_data="mail_olesyuk")]
             ])
 
             await message.answer("Выбери, на какую почту нужно отправить это задание:", reply_markup=kb_emails)
             await state.set_state(Form.select_email)
+            
+        else:
+            await state.update_data(submit_url="Уточняется")
+            await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+            await state.set_state(Form.file)
             
     except ValueError:
         await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
@@ -799,8 +856,6 @@ async def process_selection_email(callback: CallbackQuery, state: FSMContext):
         await state.update_data(submit_url="m_selin@mail.ru")
     elif callback.data == "mail_olesyuk":
         await state.update_data(submit_url="olesyuk@rgau-msha.ru")
-    elif callback.data == "mail_azagarin":
-        await state.update_data(submit_url="azagarin@rgau-msha.ru")
         
     await callback.message.answer("Почта выбрана! Теперь прикрепи файл к этому дедлайну или напиши словом 'нет', если файла нет:")
     await state.set_state(Form.file)
@@ -870,6 +925,7 @@ async def process_file(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("🎉 Задание успешно добавлено в базу данных!", reply_markup=admin_main_keyboard)
     await update_pinned_post()
+    await check_24h_reminders()
 
 
 # --- ЗАПУСК БОТА ---
@@ -901,6 +957,7 @@ async def main():
             ssl=ssl_context,
             min_size=1,
             max_size=5,
+            max_inactive_connection_lifetime=60.0,
             timeout=15,
             command_timeout=60
         )
@@ -920,22 +977,21 @@ async def main():
             )
             ''')
 
-            async with db_pool.acquire() as conn:
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS schedule (
-                    id SERIAL PRIMARY KEY,
-                    lesson_date DATE NOT NULL,
-                    start_time TEXT NOT NULL,
-                    end_time TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    notified BOOLEAN DEFAULT FALSE,
-                    message_id BIGINT DEFAULT 0,
-                    module INTEGER DEFAULT 1
-                )
-                ''')
-        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS schedule (
+                id SERIAL PRIMARY KEY,
+                lesson_date DATE NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                url TEXT NOT NULL,
+                notified BOOLEAN DEFAULT FALSE,
+                message_id BIGINT DEFAULT 0,
+                module INTEGER DEFAULT 1
+            )
+            ''')
+            
             version = await conn.fetchval("SELECT version()")
         logging.info(f"✅ Подключение к Supabase OK: {version}")
     except Exception as e:
@@ -944,32 +1000,35 @@ async def main():
     
 
     # Настраиваем задачи планировщика
-    # Настраиваем задачи планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=5)
     scheduler.add_job(update_pinned_post, 'interval', minutes=5)
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
     logging.info(
-        f"[TZ CHECK] now_msk={now_msk()} | utcnow={datetime.utcnow()} | "
-        f"delta={(now_msk() - datetime.utcnow()).total_seconds()/3600:.2f}ч | "
-        f"scheduler.tz={scheduler.timezone}"
+        f"[TZ CHECK] now_msk={now_msk()} | scheduler.tz={scheduler.timezone}"
     )
     scheduler.start()
     
+    # Сразу при старте обновляем закрепленный пост и проверяем дедлайны
     await update_pinned_post()
+    await check_24h_reminders()
     
-    # Создаем веб-сервер внутри aiogram для защиты от сна на Render
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    # Render дает порт в переменных среды PORT, по умолчанию ставим 8080
-    import os
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    # Создаем веб-сервер внутри aiogram для хостинга (например, Render)
+    try:
+        import os
+        port = int(os.environ.get("PORT", 8080))
+        app = web.Application()
+        app.router.add_get("/", handle_web)
+        app.router.add_get("/health", handle_web)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logging.info(f"Веб-сервер запущен на порту {port}")
+    except Exception as e:
+        logging.warning(f"Не удалось запустить веб-сервер: {e}")
+
     # Запускаем чтение сообщений Telegram
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
