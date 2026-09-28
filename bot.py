@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from aiogram.webhook.aiohttp_handler import SimpleRequestHandler, setup_application
 import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router
@@ -13,6 +12,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.enums import ParseMode
 from aiohttp import web
 from aiogram.filters import Command, StateFilter
+
+from aiogram.webhook.aiohttp_handler import SimpleRequestHandler, TokenBasedCheckRequestHandler, setup_application
+import os
+
 
 import asyncpg
 import urllib.parse
