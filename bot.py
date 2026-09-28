@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from aiogram.webhook.aiohttp_handler import SimpleRequestHandler, setup_application
+import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -1015,23 +1017,47 @@ async def main():
     await check_24h_reminders()
     
     # Создаем веб-сервер внутри aiogram для хостинга (например, Render)
-    try:
-        import os
-        port = int(os.environ.get("PORT", 8080))
-        app = web.Application()
-        app.router.add_get("/", handle_web)
-        app.router.add_get("/health", handle_web)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        logging.info(f"Веб-сервер запущен на порту {port}")
-    except Exception as e:
-        logging.warning(f"Не удалось запустить веб-сервер: {e}")
+    # Настройка портов и URL для вебхука
+    PORT = int(os.environ.get("PORT", 10000))
+    WEBHOOK_HOST = os.environ.get("RENDER_EXTERNAL_URL", "https://onrender.com")
+    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+    WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-    # Запускаем чтение сообщений Telegram
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    # Регистрируем вебхук в Telegram
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+        drop_pending_updates=True,
+        allowed_updates=dp.resolve_used_update_types()
+    )
+    logging.info(f"Вебхук успешно установлен на: {WEBHOOK_URL}")
+
+    # Создаем aiohttp приложение
+    app = web.Application()
+    
+    # Добавляем обработчики для проверки жизни сервера хостингом Render
+    app.router.add_get("/", handle_web)
+    app.router.add_get("/health", handle_web)
+
+    # Привязываем обработчик вебхуков aiogram к URL
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+
+    # Настраиваем приложение aiogram
+    setup_application(app, dp, bot=bot)
+
+    # Запускаем сервер на порту Render
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"Веб-сервер вебхуков запущен на порту {PORT}")
+
+    # Удерживаем бота запущенным без использования polling
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        pass
+
 
 
 if __name__ == "__main__":
