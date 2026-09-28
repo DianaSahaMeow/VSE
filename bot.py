@@ -13,8 +13,7 @@ from aiogram.enums import ParseMode
 from aiohttp import web
 from aiogram.filters import Command, StateFilter
 
-from aiogram.webhook.aiohttp_handler import SimpleRequestHandler, TokenBasedCheckRequestHandler, setup_application
-import os
+
 
 
 import asyncpg
@@ -953,29 +952,21 @@ async def main():
     dp.include_router(router)
 
     # 1. МГНОВЕННЫЙ ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ RENDER (Чтобы пройти Port Scan)
-    try:
-        PORT = int(os.environ.get("PORT", 10000))
-        WEBHOOK_HOST = os.environ.get("RENDER_EXTERNAL_URL", "https://onrender.com")
-        WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-        WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+    # Создаем веб-сервер, чтобы Render видел активность и не гасил бота
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    app.router.add_get("/health", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
 
-        app = web.Application()
-        app.router.add_get("/", handle_web)
-        app.router.add_get("/health", handle_web)
+    # Берем порт, который требует Render (по умолчанию 10000)
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Веб-сервер успешно запущен на порту {port}")
 
-        # Настраиваем aiogram webhook 3.x
-        webhook_handler = TokenBasedCheckRequestHandler(dispatcher=dp, bot=bot)
-        webhook_handler.register(app, path=WEBHOOK_PATH)
-        setup_application(app, dp, bot=bot)
 
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", PORT)
-        await site.start()
-        logging.info(f"🚀 Веб-сервер успешно запущен на порту {PORT}")
-    except Exception as e:
-        logging.error(f"❌ Критическая ошибка запуска веб-сервера: {e}")
-        return
+
 
     # 2. ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ SUPABASE
     import ssl
@@ -1023,18 +1014,12 @@ async def main():
     await update_pinned_post()
     await check_24h_reminders()
 
-    # 4. УСТАНОВКА ВЕБХУКА В ТЕЛЕГРАМ
-    try:
-        await bot.set_webhook(
-            url=WEBHOOK_URL,
-            drop_pending_updates=True,
-            allowed_updates=dp.resolve_used_update_types()
-        )
-        logging.info(f"🔗 Вебхук зарегистрирован в Telegram: {WEBHOOK_URL}")
-    except Exception as e:
-        logging.error(f"❌ Не удалось установить вебхук: {e}")
-
-    # Удерживаем контекст main() активным
+    # Запускаем поллинг как фоновую задачу, чтобы не блокировать завершение инициализации деплоя Render
+    await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(dp.start_polling(bot))
+    logging.info("🤖 Бот успешно перешел в режим Polling и слушает команды!")
+    
+    # Удерживаем main запущенным
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
