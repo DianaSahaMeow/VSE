@@ -345,6 +345,9 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                                 text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ {format_submit_url(url, is_expired=False).replace('📥 <b>Куда сдавать:</b> ', '')}"
                             else:
                                 text += format_submit_url(url, is_expired=False)
+                            if msg_id and msg_id != 0:
+                                text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
+                            text += f"— — — — — — — — — — — — — —\n"
                         else:
                             if is_expired:
                                 text += f"❌ <b>(Дедлайн прошел)</b>\n"
@@ -727,6 +730,7 @@ async def process_edit_save(message: Message, state: FSMContext):
                 logging.error(f"Не удалось изменить пост {msg_id} в ленте канала: {e}")
 
         # 2. ОТПРАВЛЯЕМ НОВОЕ ОТДЕЛЬНОЕ СООБЩЕНИЕ УВЕДОМЛЕНИЯ В КАНАЛ
+        # 2. ОТПРАВЛЯЕМ НОВОЕ ОТДЕЛЬНОЕ СООБЩЕНИЕ УВЕДОМЛЕНИЯ В КАНАЛ (С ССЫЛКОЙ)
         alert_channel_text = f"🔔 <b>Внимание! Задание изменено</b> {hashtag}\n\n📚 <b>Предмет:</b> {clean_html(subj)}\n"
         if field == "description":
             alert_channel_text += f"❌ <s>📝 <b>Что сделать было:</b> {clean_html(old_desc)}</s>\n✅ 📝 <b>Что сделать стало:</b> {clean_html(new_text)}\n"
@@ -734,6 +738,11 @@ async def process_edit_save(message: Message, state: FSMContext):
             alert_channel_text += f"❌ <s>⏰ <b>Сдать до было:</b> {dt_old_format}</s>\n✅ ⏰ <b>Сдать до стало:</b> <code>{dt_new_format}</code>\n"
         elif field == "submit_url":
             alert_channel_text += f"❌ <s>📥 <b>Куда сдавать было:</b> {clean_html(old_url)}</s>\n✅ 📥 <b>Куда сдавать стало:</b> {clean_html(new_text)}\n"
+        
+        # Добавляем ссылку на само задание, если она существует
+        if msg_id and msg_id != 0:
+            alert_channel_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Перейти к заданию</a>\n"
+            
         alert_channel_text += "\n📋 Изменения внесены в закрепленный пост группы!"
 
         try:
@@ -937,122 +946,92 @@ async def handle_web(request):
 
 # --- ЗАПУСК БОТА ---
 async def main():
-    global db_pool  # <-- ДОБАВЬТЕ ЭТУ СТРОКУ!
+    global db_pool
     dp.include_router(router)
 
-    # Создаем пул подключений к Supabase
-    # Создаем пул подключений к Supabase по экранированной защищенной строке
-    # Создаем пул подключений к Supabase по экранированной защищенной строке с SNI
-    import ssl
+    # 1. МГНОВЕННЫЙ ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ RENDER (Чтобы пройти Port Scan)
+    try:
+        PORT = int(os.environ.get("PORT", 10000))
+        WEBHOOK_HOST = os.environ.get("RENDER_EXTERNAL_URL", "https://onrender.com")
+        WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+        WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
+        app = web.Application()
+        app.router.add_get("/", handle_web)
+        app.router.add_get("/health", handle_web)
+
+        # Настраиваем aiogram webhook 3.x
+        webhook_handler = TokenBasedCheckRequestHandler(dispatcher=dp, bot=bot)
+        webhook_handler.register(app, path=WEBHOOK_PATH)
+        setup_application(app, dp, bot=bot)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        logging.info(f"🚀 Веб-сервер успешно запущен на порту {PORT}")
+    except Exception as e:
+        logging.error(f"❌ Критическая ошибка запуска веб-сервера: {e}")
+        return
+
+    # 2. ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ SUPABASE
+    import ssl
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
 
     try:
         db_pool = await asyncpg.create_pool(
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            ssl=ssl_context,
-            min_size=1,
-            max_size=5,
-            max_inactive_connection_lifetime=60.0,
-            timeout=15,
-            command_timeout=60
+            user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT,
+            database=DB_NAME, ssl=ssl_context, min_size=1, max_size=5,
+            max_inactive_connection_lifetime=60.0, timeout=15, command_timeout=60
         )
 
         async with db_pool.acquire() as conn:
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS tasks (
-                id SERIAL PRIMARY KEY,
-                subject TEXT,
-                description TEXT,
-                deadline TEXT,
-                submit_url TEXT,
-                file_id TEXT,
-                notified INTEGER DEFAULT 0,
-                message_id INTEGER DEFAULT 0,
-                edit_message_ids TEXT DEFAULT ''
-            )
-            ''')
-
+                id SERIAL PRIMARY KEY, subject TEXT, description TEXT, deadline TEXT,
+                submit_url TEXT, file_id TEXT, notified INTEGER DEFAULT 0,
+                message_id INTEGER DEFAULT 0, edit_message_ids TEXT DEFAULT ''
+            )''')
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS schedule (
-                id SERIAL PRIMARY KEY,
-                lesson_date DATE NOT NULL,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                url TEXT NOT NULL,
-                notified BOOLEAN DEFAULT FALSE,
-                message_id BIGINT DEFAULT 0,
+                id SERIAL PRIMARY KEY, lesson_date DATE NOT NULL, start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL,
+                url TEXT NOT NULL, notified BOOLEAN DEFAULT FALSE, message_id BIGINT DEFAULT 0,
                 module INTEGER DEFAULT 1
-            )
-            ''')
-            
+            )''')
             version = await conn.fetchval("SELECT version()")
         logging.info(f"✅ Подключение к Supabase OK: {version}")
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к БД: {e!r}")
-        raise
-    
+        return
 
-    # Настраиваем задачи планировщика
+    # 3. НАСТРОЙКА ПЛАНИРОВЩИКА СЛУЖБ
     scheduler.add_job(check_24h_reminders, 'interval', minutes=5)
     scheduler.add_job(update_pinned_post, 'interval', minutes=5)
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
-    logging.info(
-        f"[TZ CHECK] now_msk={now_msk()} | scheduler.tz={scheduler.timezone}"
-    )
     scheduler.start()
-    
-    # Сразу при старте обновляем закрепленный пост и проверяем дедлайны
+    logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
+
+    # Первичный запуск проверок
     await update_pinned_post()
     await check_24h_reminders()
-    
-    # Создаем веб-сервер внутри aiogram для хостинга (например, Render)
-    # Настройка портов и URL для вебхука
-    PORT = int(os.environ.get("PORT", 10000))
-    WEBHOOK_HOST = os.environ.get("RENDER_EXTERNAL_URL", "https://onrender.com")
-    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-    WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-    # Регистрируем вебхук в Telegram
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        drop_pending_updates=True,
-        allowed_updates=dp.resolve_used_update_types()
-    )
-    logging.info(f"Вебхук успешно установлен на: {WEBHOOK_URL}")
+    # 4. УСТАНОВКА ВЕБХУКА В ТЕЛЕГРАМ
+    try:
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            drop_pending_updates=True,
+            allowed_updates=dp.resolve_used_update_types()
+        )
+        logging.info(f"🔗 Вебхук зарегистрирован в Telegram: {WEBHOOK_URL}")
+    except Exception as e:
+        logging.error(f"❌ Не удалось установить вебхук: {e}")
 
-    # Создаем aiohttp приложение
-    app = web.Application()
-    
-    # Добавляем обработчики для проверки жизни сервера хостингом Render
-    app.router.add_get("/", handle_web)
-    app.router.add_get("/health", handle_web)
-
-    # Привязываем обработчик вебхуков aiogram к URL
-    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    webhook_handler.register(app, path=WEBHOOK_PATH)
-
-    # Настраиваем приложение aiogram
-    setup_application(app, dp, bot=bot)
-
-    # Запускаем сервер на порту Render
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logging.info(f"Веб-сервер вебхуков запущен на порту {PORT}")
-
-    # Удерживаем бота запущенным без использования polling
+    # Удерживаем контекст main() активным
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
