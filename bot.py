@@ -332,7 +332,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                         is_expired = task_deadline < now
                         
                         if t_id == changed_id:
-                            text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
+                            text += "🔄 <b>Задание изменено</b>\n"
                             if field == "description":
                                 text += f"{idx}. 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
                             else:
