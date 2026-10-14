@@ -897,7 +897,8 @@ async def process_deadline(message: Message, state: FSMContext):
             # Для селекции создаем кнопки выбора почты преподавателя с защитой от разметки
             kb_emails = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📧 m_selin@mail.ru", callback_data="mail_selin")],
-                [InlineKeyboardButton(text="📧 olesyuk@rgau-msha.ru", callback_data="mail_olesyuk")]
+                [InlineKeyboardButton(text="📧 olesyuk@rgau-msha.ru", callback_data="mail_olesyuk")],
+                [InlineKeyboardButton(text="📧 ahi-bah@yandex.ru", callback_data="ahi-bah@yandex.ru")]
             ])
 
             await message.answer("Выбери, на какую почту нужно отправить это задание:", reply_markup=kb_emails)
@@ -921,7 +922,8 @@ async def process_selection_email(callback: CallbackQuery, state: FSMContext):
         await state.update_data(submit_url="m_selin@mail.ru")
     elif callback.data == "mail_olesyuk":
         await state.update_data(submit_url="olesyuk@rgau-msha.ru")
-        
+    elif callback.data == "ahi-bah@yandex.ru":
+        await state.update_data(submit_url="ahi-bah@yandex.ru")
     await callback.message.answer("Почта выбрана! Теперь прикрепи файл к этому дедлайну или напиши словом 'нет', если файла нет:")
     await state.set_state(Form.file)
 
