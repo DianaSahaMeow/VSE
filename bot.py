@@ -30,6 +30,7 @@ BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
 CHANNEL_ID = -1004330638807  # ID канала с -100
 ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
+# --- НАСТРОЙКА ЯНДЕКС.ДИСКА ---
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE (IPv4 через Session Pooler) ---
@@ -157,8 +158,14 @@ async def update_pinned_post():
                 
                 # Шапка предмета
                 text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
-                subj_tasks = await conn.fetch("SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
-                # Если по предмету вообще нет никаких заданий в базе данных
+                # Фильтр: дедлайн еще не прошел ИЛИ прошел менее 14 дней назад
+                two_weeks_ago_str = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
+                subj_tasks = await conn.fetch(
+                    "SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 AND deadline >= $2 ORDER BY deadline ASC", 
+                    subj_name, two_weeks_ago_str
+                )
+
+                 # Если по предмету вообще нет никаких заданий в базе данных
                 if not subj_tasks:
                     text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
                     text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
