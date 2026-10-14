@@ -213,30 +213,70 @@ async def update_pinned_post():
         logging.error(f"Глобальная ошибка в update_pinned_post: {e}", exc_info=True)
 
 # --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ПОСЛЕ ДЕДЛАЙНА ---
+# --- АВТОМАТИЧЕСКАЯ ОЧИСТКА БАЗЫ ДАННЫХ В КОНЦЕ КАЖДОГО МОДУЛЯ ---
+# --- АВТОМАТИЧЕСКАЯ ОЧИСТКА В КОНЦЕ МОДУЛЕЙ С РЕДАКТИРОВАНИЕМ ПОСТОВ В КАНАЛЕ ---
 async def clear_old_deadlines():
     try:
-        # Рассчитываем временную метку: текущее время минус 14 дней
-        two_weeks_ago = (now_msk() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
+        now = now_msk()
+        current_date_str = now.strftime("%m-%d") # Получаем формат "10-26"
+        
+        # Даты окончания модулей 
+        module_end_dates = ["10-26", "12-21", "03-25", "06-21"]
+        
+        # Если сегодня не день окончания модуля — ничего не делаем
+        if current_date_str not in module_end_dates:
+            logging.info(f"Проверка очистки: сегодня {current_date_str}, ждем конца модуля.")
+            return
+
+        logging.info(f"📆 Наступил конец модуля ({current_date_str}). Начинаем очистку постов и базы данных...")
+        
         async with db_pool.acquire() as conn:
-            old_tasks = await conn.fetch("SELECT id, message_id FROM tasks WHERE deadline < $1", two_weeks_ago)
+            # Выбираем абсолютно все задания текущего модуля из базы
+            all_module_tasks = await conn.fetch("SELECT id, message_id, edit_message_ids, subject FROM tasks")
             
-            for task in old_tasks:
-                task_id = task['id']
+            for task in all_module_tasks:
                 msg_id = task['message_id']
+                edit_ids_str = task['edit_message_ids']
+                subj_name = task['subject']
                 
-                # Удаляем оригинальный пост из ленты канала
+                # Текст, в который превратятся все старые посты в конце модуля
+                clear_text = f"📦 <b>Архив {current_date_str.split('-')[1]} модуля</b>\n📘 Предмет: {clean_html(subj_name)}\n✓ Обучение по модулю завершено."
+                
+                # 1. "Схлопываем" основной пост задания в канале
                 if msg_id and msg_id != 0:
                     try:
-                        await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                        await bot.edit_message_text(
+                            text=clear_text, 
+                            chat_id=CHANNEL_ID, 
+                            message_id=msg_id, 
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=None # Удаляем кнопку "Куда сдавать"
+                        )
+                        logging.info(f"✓ Схлопнут старый пост задания {msg_id}")
                     except Exception as e:
-                        logging.error(f"Не удалось автоматически удалить старый пост {msg_id}: {e}")
-                        
-                # Стираем запись из облачной базы данных
-                await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+                        logging.error(f"Не удалось отредактировать старый пост {msg_id}: {e}")
                 
-            if old_tasks:
-                logging.info(f"Автоочистка архива: успешно удалено заданий: {len(old_tasks)}")
-                await update_pinned_post()
+                # 2. "Схлопываем" посты с уведомлениями об изменениях этого задания
+                if edit_ids_str:
+                    edit_ids = [int(x) for x in edit_ids_str.split(",") if x.strip()]
+                    for e_id in edit_ids:
+                        try:
+                            await bot.edit_message_text(
+                                text="🔄 <i>Это уведомление об изменении устарело (модуль завершен).</i>", 
+                                chat_id=CHANNEL_ID, 
+                                message_id=e_id, 
+                                parse_mode=ParseMode.HTML
+                            )
+                        except Exception:
+                            pass
+
+            # 3. Полностью очищаем таблицу tasks в облаке Supabase под ноль
+            await conn.execute("DELETE FROM tasks")
+            logging.info("🧹 Таблица tasks в базе данных успешно зачищена.")
+            
+        # Обнуляем и очищаем закрепленный пост
+        await update_pinned_post()
+        
     except Exception as e:
         logging.error(f"Ошибка в clear_old_deadlines: {e}", exc_info=True)
 
@@ -332,7 +372,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
                         is_expired = task_deadline < now
                         
                         if t_id == changed_id:
-                            text += "🔄 <b>Задание изменено</b>\n"
+                            text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
                             if field == "description":
                                 text += f"{idx}. 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
                             else:
@@ -444,6 +484,19 @@ async def check_24h_reminders():
                     
                     await conn.execute("UPDATE tasks SET notified = 1 WHERE id = $1", task_id)
                     logging.info(f"Успешно отправлено напоминание за 24ч для таски {task_id}")
+                                        # Напоминание удалится автоматически ровно через 24 часа (прямо в момент дедлайна)
+                    try:
+                        reminder_msg_id = msg.message_id
+                        scheduler.add_job(
+                            bot.delete_message, 
+                            'date', 
+                            run_date=datetime.now() + timedelta(hours=24), 
+                            kwargs={"chat_id": CHANNEL_ID, "message_id": reminder_msg_id}
+                        )
+                        logging.info(f"⏰ Запланировано автоудаление напоминания {reminder_msg_id} через 24 часа")
+                    except Exception as ex:
+                        logging.error(f"Не удалось выставить таймер удаления напоминания: {ex}")
+
                 except Exception as e:
                     logging.error(f"Не удалось отправить напоминание для таски {task_id}: {e}")
     except Exception as e:
@@ -602,40 +655,39 @@ async def manage_tasks(message: Message):
                 parse_mode=ParseMode.HTML
             )
 # Удаление поста, закрепа и всей цепочки промежуточных уведомлений об изменениях (Supabase)
+# Ручное полное удаление задания старостой через меню управления
 @router.callback_query(F.data.startswith("del_"))
 async def delete_task_callback(callback: CallbackQuery):
-    task_id = int(callback.data.split("_")[1])  # Извлекаем ID из кнопки
+    task_id = int(callback.data.split("_")[1]) # Индекс исправлен
     
     async with db_pool.acquire() as conn:
-        # Вытаскиваем ID оригинального сообщения и строку со всеми ID правок
         res = await conn.fetchrow("SELECT message_id, edit_message_ids FROM tasks WHERE id = $1", task_id)
         
         if res:
             orig_msg_id = res['message_id']
             edit_msg_ids_str = res['edit_message_ids']
             
-            # 1. Стираем оригинальный пост из ленты канала
+            # 1. Пробуем физически удалить оригинальный пост из чата
             if orig_msg_id and orig_msg_id != 0:
                 try:
                     await bot.delete_message(chat_id=CHANNEL_ID, message_id=orig_msg_id)
                 except Exception as e:
-                    logging.error(f"Не удалось стереть оригинальный пост {orig_msg_id}: {e}")
+                    logging.error(f"Ручное удаление: пост {orig_msg_id} старше 48ч или не найден: {e}")
                     
-            # 2. Поочередно стираем все посты с уведомлениями об изменениях
+            # 2. Пробуем удалить посты с изменениями
             if edit_msg_ids_str:
-                # Превращаем текст "124,125" в список чисел и удаляем пробелы
                 edit_ids = [int(x) for x in edit_msg_ids_str.split(",") if x.strip()]
                 for e_id in edit_ids:
                     try:
                         await bot.delete_message(chat_id=CHANNEL_ID, message_id=e_id)
-                    except Exception as e:
-                        logging.error(f"Не удалось стереть промежуточное обновление {e_id}: {e}")
+                    except Exception:
+                        pass
                 
-        # 3. Полностью удаляем саму строчку задания из облака Supabase
+        # 3. Удаляем строчку задания из базы данных Supabase
         await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
         
     await callback.answer("Задание удалено!")
-    await callback.message.edit_text("🗑 Пост и все его уведомления полностью стёрты из ленты, базы и закрепа.")
+    await callback.message.edit_text("🗑 Задание стёрто из базы и закрепа. Посты в чате удалены (если им не больше 48 часов).")
     await update_pinned_post()
 
 
