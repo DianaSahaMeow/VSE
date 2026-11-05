@@ -822,10 +822,10 @@ async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditForm.choice)
 
 
-
 # --- ПРИВЕТСТВИЕ И АКТИВАЦИЯ КНОПОК ---
 @router.message(Command("start"), F.from_user.id == ADMIN_ID)
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):  # <-- Добавили state
+    await state.clear()  # <-- Теперь эта строчка намертво сбрасывает любые зависания при вводе /start!
     await message.answer(
         "👋 Привет, староста! Рад приветствовать тебя в панели управления группой.\n\n"
         "✨ Лови меню быстрых кнопок внизу экрана!", 
@@ -833,24 +833,34 @@ async def cmd_start(message: Message):
     )
 
 
-
 # --- ДИАЛОГ СО СТАРОСТОЙ (ДОБАВЛЕНИЕ) ---
 @router.message(Command("add"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '➕ Добавить дедлайн', F.from_user.id == ADMIN_ID)
 async def start_add(message: Message, state: FSMContext):
+    await state.clear()  # На всякий случай чистим старое состояние перед созданием нового дедлайна
     await message.answer("Выбери название предмета из списка:", reply_markup=subjects_keyboard)
     await state.set_state(Form.subject)
 
-@router.message(Form.subject)
+# Фильтруем ввод: обрабатываем только нажатие на две правильные кнопки
+@router.message(Form.subject, F.text.in_({
+    'Молекулярная биология и геномика в растениеводстве',
+    'Генетические основы селекционного процесса в растениеводстве и животноводстве'
+}))
 async def process_subject(message: Message, state: FSMContext):
     await state.update_data(subject=message.text)
     await message.answer("Опиши, что нужно сделать (какая домашка):", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.description)
 
+# Ловим любой некорректный текст (например, команды /start или /add), если староста не нажал на кнопку
+@router.message(Form.subject)
+async def process_subject_invalid(message: Message):
+    await message.answer("Пожалуйста, выберите предмет строго с помощью кнопок на клавиатуре внизу 👇", reply_markup=subjects_keyboard)
+
+
 @router.message(Form.description)
 async def process_desc(message: Message, state: FSMContext):
     await state.update_data(description=message.text)
-    await message.answer("Введи дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.09.2026 18:00)")
+    await message.answer("Введи дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.11.2026 18:00)")
     await state.set_state(Form.deadline)
 
 @router.message(Form.deadline)
