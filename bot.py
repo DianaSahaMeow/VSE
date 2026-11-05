@@ -134,26 +134,16 @@ async def update_pinned_post():
     try:
         all_possible_subjects = [
             'Молекулярная биология и геномика в растениеводстве',
-            'Генетические основы селекционного процесса в растениеводстве и животноводстве',
-            'Введение в популяционную генетику и эволюция методов оценки племенной ценности (ВИЖ практика)',
-            'ДНК-технологии в селекции животных (ВИЖ)',
-            'Семинар наставника'
+            'Генетические основы селекционного процесса в растениеводстве и животноводстве'
         ]
         
         text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
         now = now_msk()
         
         async with db_pool.acquire() as conn:
-            # Получаем все предметы из базы, чтобы не потерять другие названия
-            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks")
-            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
-            subjects_to_display = all_possible_subjects + extra_subjects
-
-            for subj_name in subjects_to_display:
-                if "Биостатистика" in subj_name: hashtag = "#биостатистика"
-                elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
+            for subj_name in all_possible_subjects:
+                if "Молекулярная биология" in subj_name: hashtag = "#мол_биология"
                 elif "Генетические основы" in subj_name: hashtag = "#селекция"
-                elif "Биоинформатика" in subj_name or "Проектный" in subj_name: hashtag = "#биоинформатика"
                 else: hashtag = "#дедлайн"
                 
                 # Шапка предмета
@@ -336,9 +326,7 @@ async def process_notice_pin(message: Message, state: FSMContext):
 async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
     try:
         all_possible_subjects = [
-            'Проектный семинар "Биоинформатика в агробиотехнологиях"',
-            'Биостатистика',
-            'Молекулярная эволюция',
+            'Молекулярная биология и геномика в растениеводстве',
             'Генетические основы селекционного процесса в растениеводстве и животноводстве'
         ]
         
@@ -346,18 +334,15 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
         now = now_msk() 
         
         async with db_pool.acquire() as conn:
-            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks")
-            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
-            subjects_to_display = all_possible_subjects + extra_subjects
-
-            for subj_name in subjects_to_display:
-                if "Биостатистика" in subj_name: hashtag = "#биостатистика"
-                elif "Молекулярная эволюция" in subj_name: hashtag = "#молекулярная_эволюция"
+            for subj_name in all_possible_subjects:
+                if "Молекулярная биология" in subj_name: hashtag = "#мол_биология"
                 elif "Генетические основы" in subj_name: hashtag = "#селекция"
-                elif "Биоинформатика" in subj_name or "Проектный" in subj_name: hashtag = "#биоинформатика"
                 else: hashtag = "#дедлайн"
                 
                 text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
+                
+                # Дальше идет ваш существующий код: subj_tasks = await conn.fetch(...)
+
                 
                 subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
                 if not subj_tasks:
@@ -755,10 +740,9 @@ async def process_edit_save(message: Message, state: FSMContext):
         dt_old_format = datetime.strptime(old_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
         dt_new_format = datetime.strptime(final_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
         
-        if "Биостатистика" in subj: hashtag = "#биостатистика"
-        elif "Молекулярная эволюция" in subj: hashtag = "#молекулярная_эволюция"
+        if "Молекулярная биология" in subj: hashtag = "#мол_биология"
         elif "Генетические основы" in subj: hashtag = "#селекция"
-        else: hashtag = "#биоинформатика"
+        else: hashtag = "#дедлайн"
 
         # 1. ТЕКСТ ДЛЯ ОБНОВЛЕНИЯ СТАРОГО ПОСТА В ЛЕНТЕ (С П ПЕРЕЧЕРКИВАНИЕМ)
         edited_post_text = f"🔄 <b>Задание изменено!</b> {hashtag}\n\n📘 <b>Предмет:</b> {clean_html(subj)}\n"
