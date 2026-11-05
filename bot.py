@@ -967,7 +967,7 @@ async def send_daily_morning_summary():
         today_display = now.strftime("%d.%m.%Y")
         
         # Заголовки сводки
-        text = f"☀️ <b>Доброе утро! Сводка на сегодня ({today_display})</b> ☀️\n\n"
+        text = f" <b>Сводка на сегодня ({today_display})</b> \n\n"
         
         async with db_pool.acquire() as conn:
             # 1. ПОЛУЧАЕМ ПАРЫ НА СЕГОДНЯ
