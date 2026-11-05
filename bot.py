@@ -56,18 +56,16 @@ admin_main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True  # Делает кнопки аккуратными и маленькими
 )
 
-# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ ---
+# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ (ТОЛЬКО 2 ГЛАВНЫХ ПРЕДМЕТА) ---
 subjects_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text='Молекулярная биология и геномика в растениеводстве')],
-        [KeyboardButton(text='Генетические основы селекционного процесса в растениеводстве и животноводстве')],
-        [KeyboardButton(text='Введение в популяционную генетику и эволюция методов оценки племенной ценности (ВИЖ практика)')],
-        [KeyboardButton(text='ДНК-технологии в селекции животных (ВИЖ)')],
-        [KeyboardButton(text='Семинар наставника')]
+        [KeyboardButton(text='Генетические основы селекционного процесса в растениеводстве и животноводстве')]
     ],
     resize_keyboard=True,
     one_time_keyboard=True
 )
+
 # --- КЛАВИАТУРА ДЛЯ ВАЖНЫХ УВЕДОМЛЕНИЙ ---
 pin_keyboard = ReplyKeyboardMarkup(
     keyboard=[
@@ -961,6 +959,88 @@ async def process_file(message: Message, state: FSMContext):
 async def handle_web(request):
     return web.Response(text="Бот активен и работает 24/7!")
 
+async def send_daily_morning_summary():
+    """Каждое утро отправляет сводку пар и дедлайнов на текущий день."""
+    try:
+        now = now_msk()
+        today_date_str = now.strftime("%Y-%m-%d")  # "2026-11-05"
+        today_display = now.strftime("%d.%m.%Y")
+        
+        # Заголовки сводки
+        text = f"☀️ <b>Доброе утро! Сводка на сегодня ({today_display})</b> ☀️\n\n"
+        
+        async with db_pool.acquire() as conn:
+            # 1. ПОЛУЧАЕМ ПАРЫ НА СЕГОДНЯ
+            # Выбираем только те, что имеют ссылки, как вы просили
+            rows_lessons = await conn.fetch(
+                """
+                SELECT start_time, end_time, subject, kind, url 
+                FROM schedule 
+                WHERE lesson_date = $1 
+                ORDER BY start_time ASC
+                """,
+                now.date()
+            )
+            
+            text += "📅 <b>Расписание пар на сегодня:</b>\n"
+            if rows_lessons:
+                for idx, row in enumerate(rows_lessons, start=1):
+                    subj = clean_html(row['subject'])
+                    kind = row['kind']
+                    start = row['start_time']
+                    end = row['end_time']
+                    url = row['url']
+                    
+                    text += f"{idx}. 🕒 <code>{start} - {end}</code> | <b>{subj}</b> ({kind})\n"
+                    text += f"   🔗 <a href='{url}'>Подключиться к Телемосту</a>\n"
+            else:
+                text += "🎉 Пар со ссылками на сегодня нет! Можно отдохнуть.\n"
+                
+            text += "\n"  # Отступ
+            
+            # 2. ПОЛУЧАЕМ ДЕДЛАЙНЫ НА СЕГОДНЯ
+            # Ищем дедлайны, которые попадают на сегодняшние сутки
+            today_start = f"{today_date_str} 00:00"
+            today_end = f"{today_date_str} 23:59"
+            
+            rows_tasks = await conn.fetch(
+                """
+                SELECT description, deadline, message_id 
+                FROM tasks 
+                WHERE deadline BETWEEN $1 AND $2 
+                ORDER BY deadline ASC
+                """,
+                today_start, today_end
+            )
+            
+            text += "🔥 <b>Дедлайны, которые истекают СЕГОДНЯ:</b>\n"
+            if rows_tasks:
+                for idx, task in enumerate(rows_tasks, start=1):
+                    desc = clean_html(task['description'])
+                    dead_raw = task['deadline']
+                    msg_id = task['message_id']
+                    
+                    try:
+                        time_str = datetime.strptime(dead_raw.strip(), "%Y-%m-%d %H:%M").strftime("%H:%M")
+                    except Exception:
+                        time_str = dead_raw
+                        
+                    text += f"{idx}. 📝 {desc}\n"
+                    text += f"   ⏰ <b>Заканчивается в:</b> <code>{time_str}</code>\n"
+                    
+                    if msg_id and msg_id != 0:
+                        text += f"   🔗 <a href='{task_link(msg_id)}'>📎 Перейти к заданию</a>\n"
+            else:
+                text += "✅ Сегодня ничего сдавать не нужно. Чистый день!\n"
+                
+        # Отправляем готовую сводку в канал
+        await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        logging.info("Утренняя сводка успешно сгенерирована и отправлена.")
+        
+    except Exception as e:
+        logging.error(f"Ошибка при формировании утренней сводки: {e}", exc_info=True)
+
+
 # --- ЗАПУСК БОТА ---
 async def main():
     global db_pool
@@ -1022,6 +1102,8 @@ async def main():
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
+    scheduler.add_job(send_daily_morning_summary, 'cron', hour=13, minute=0)
+    
     scheduler.start()
     logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
 
