@@ -563,43 +563,45 @@ async def send_lesson_reminders():
     except Exception as e:
         logging.error(f"Ошибка в send_lesson_reminders: {e}", exc_info=True)
 
-
 async def cleanup_lesson_reminders():
-    """Удаляет уведомления, отправленные более 15 минут назад после начала пары."""
+    """Удаляет уведомление о паре строго ПОСЛЕ её завершения."""
     try:
         now = now_msk()
-
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, lesson_date, start_time, message_id
-                FROM schedule
+                SELECT id, lesson_date, end_time, message_id 
+                FROM schedule 
                 WHERE notified = TRUE AND message_id > 0
                 """
             )
 
             for row in rows:
                 try:
-                    start_dt = datetime.strptime(
-                        f"{row['lesson_date']} {row['start_time']}",
+                    # Парсим точное время ОКОНЧАНИЯ пары
+                    end_dt = datetime.strptime(
+                        f"{row['lesson_date']} {row['end_time']}",
                         "%Y-%m-%d %H:%M"
                     )
                 except ValueError:
                     continue
 
-                # Если с начала пары прошло больше 15 минут — удаляем сообщение
-                if (now - start_dt).total_seconds() > 15 * 60:
+                # Если текущее время больше времени окончания пары — удаляем сообщение со ссылкой
+                if now >= end_dt:
                     try:
                         await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
-                        logging.info(f"Удалено уведомление (msg_id={row['message_id']})")
+                        logging.info(f"Пара завершена. Удалено уведомление (msg_id={row['message_id']})")
                     except Exception as e:
                         logging.error(f"Не удалось удалить уведомление {row['message_id']}: {e}")
+                    
+                    # Сбрасываем message_id в базе, чтобы больше не трогать этот пост
                     await conn.execute(
                         "UPDATE schedule SET message_id = 0 WHERE id = $1",
                         row['id']
                     )
     except Exception as e:
         logging.error(f"Ошибка в cleanup_lesson_reminders: {e}", exc_info=True)
+
 
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
@@ -898,14 +900,14 @@ async def process_file(message: Message, state: FSMContext):
     url_val = data['submit_url']
     
     # Автоматически определяем нужный хештег по ключевым словам
-    if "Биостатистика" in data['subject']:
-        hashtag = "#биостатистика"
-    elif "Молекулярная эволюция" in data['subject']:
-        hashtag = "#молекулярная_эволюция"
+    # Автоматически определяем нужный хештег по ключевым словам
+    if "Молекулярная биология" in data['subject']:
+        hashtag = "#мол_биология"
     elif "Генетические основы" in data['subject']:
         hashtag = "#селекция"
     else:
-        hashtag = "#биоинформатика"
+        hashtag = "#дедлайн"
+
     
     new_task_text = (
         f"📚 <b>Новое задание в расписании</b> {hashtag}\n\n"  #  Теперь заголовок будет реально жирным!
@@ -1028,11 +1030,31 @@ async def send_daily_morning_summary():
                 text += "✅ Сегодня ничего сдавать не нужно. Чистый день!\n"
                 
         # Отправляем готовую сводку в канал
-        await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        msg_summary = await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         logging.info("Утренняя сводка успешно сгенерирована и отправлена.")
+        
+        # Запоминаем ID сообщения утренней сводки в расписании на сегодня, чтобы удалить его ночью
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE schedule SET message_id = $1 WHERE lesson_date = $2", msg_summary.message_id, now.date())
         
     except Exception as e:
         logging.error(f"Ошибка при формировании утренней сводки: {e}", exc_info=True)
+
+async def cleanup_daily_morning_summary():
+    """В конце дня (в 23:59) удаляет утреннюю сводку, чтобы не захламлять ленту."""
+    try:
+        now = now_msk()
+        async with db_pool.acquire() as conn:
+            # Ищем message_id сводки за сегодняшний день
+            row = await conn.fetchrow("SELECT DISTINCT message_id FROM schedule WHERE lesson_date = $1 AND message_id > 0", now.date())
+            if row and row['message_id']:
+                try:
+                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
+                    logging.info(f"Утренняя сводка (msg_id={row['message_id']}) успешно удалена в конце дня.")
+                except Exception as e:
+                    logging.error(f"Не удалось удалить утреннюю сводку: {e}")
+    except Exception as e:
+        logging.error(f"Ошибка в cleanup_daily_morning_summary: {e}", exc_info=True)
 
 
 # --- ЗАПУСК БОТА ---
@@ -1091,14 +1113,19 @@ async def main():
         return
 
     # 3. НАСТРОЙКА ПЛАНИРОВЩИКА СЛУЖБ
+    # 3. НАСТРОЙКА ПЛАНИРОВЩИКА СЛУЖБ
     scheduler.add_job(check_24h_reminders, 'interval', minutes=5)
     scheduler.add_job(update_pinned_post, 'interval', minutes=5)
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
-    scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
-    scheduler.add_job(send_daily_morning_summary, 'cron', hour=13, minute=0)
+    scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1) # Проверка каждую минуту
+    scheduler.add_job(send_daily_morning_summary, 'cron', hour=8, minute=0)
+    
+    # ДОБАВИТЬ ЭТУ СТРОКУ (Удаление сводки каждый день в 23:59):
+    scheduler.add_job(cleanup_daily_morning_summary, 'cron', hour=23, minute=59)
     
     scheduler.start()
+
     logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
 
     # Первичный запуск проверок
