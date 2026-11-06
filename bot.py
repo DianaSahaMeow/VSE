@@ -604,8 +604,9 @@ async def cleanup_lesson_reminders():
 
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
-async def manage_tasks(message: Message, state: FSMContext):  # <-- Передали state
-    await state.clear()  # <-- Сброс сработает без ошибок
+async def manage_tasks(message: Message, state: FSMContext): # <-- ИСПРАВЛЕНО
+    await state.clear()
+# <-- Сброс сработает без ошибок
     async with db_pool.acquire() as conn:
         tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
         
@@ -1118,7 +1119,7 @@ async def main():
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1) # Проверка каждую минуту
-    scheduler.add_job(send_daily_morning_summary, 'cron', hour=8, minute=0)
+    scheduler.add_job(send_daily_morning_summary, 'cron', hour=10, minute=0)
     
     # ДОБАВИТЬ ЭТУ СТРОКУ (Удаление сводки каждый день в 23:59):
     scheduler.add_job(cleanup_daily_morning_summary, 'cron', hour=23, minute=59)
