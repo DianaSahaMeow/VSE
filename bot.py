@@ -602,11 +602,10 @@ async def cleanup_lesson_reminders():
     except Exception as e:
         logging.error(f"Ошибка в cleanup_lesson_reminders: {e}", exc_info=True)
 
-
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
-async def manage_tasks(message: Message, state: FSMContext):  # <-- Добавили state сюда
-    await state.clear()
+async def manage_tasks(message: Message, state: FSMContext):  # <-- Передали state
+    await state.clear()  # <-- Сброс сработает без ошибок
     async with db_pool.acquire() as conn:
         tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
         
@@ -627,13 +626,11 @@ async def manage_tasks(message: Message, state: FSMContext):  # <-- Добави
             except Exception:
                 dt = dead
             
-            # Верхний ряд — кнопка «Перейти к посту» (только если есть message_id)
             rows = []
             if msg_id and msg_id != 0:
                 rows.append([
                     InlineKeyboardButton(text="📎 Перейти к посту", url=task_link(msg_id))
                 ])
-            # Нижний ряд — изменить / удалить
             rows.append([
                 InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
                 InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
@@ -645,6 +642,7 @@ async def manage_tasks(message: Message, state: FSMContext):  # <-- Добави
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
             )
+
 # Удаление поста, закрепа и всей цепочки промежуточных уведомлений об изменениях (Supabase)
 # Ручное полное удаление задания старостой через меню управления
 @router.callback_query(F.data.startswith("del_"))
