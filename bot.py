@@ -605,7 +605,8 @@ async def cleanup_lesson_reminders():
 
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
-async def manage_tasks(message: Message):
+async def manage_tasks(message: Message, state: FSMContext):  # <-- Добавили state сюда
+    await state.clear()
     async with db_pool.acquire() as conn:
         tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
         
@@ -613,7 +614,7 @@ async def manage_tasks(message: Message):
             await message.answer("В базе данных пока нет заданий.")
             return
             
-        await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:")
+        await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:", parse_mode=ParseMode.HTML)
         
         for t in tasks:
             t_id = t['id']
