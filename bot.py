@@ -604,10 +604,9 @@ async def cleanup_lesson_reminders():
 
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
-async def manage_tasks(message: Message, state: FSMContext): # <-- ИСПРАВЛЕНО
+async def manage_tasks(message: Message, state: FSMContext):
     await state.clear()
-# <-- Сброс сработает без ошибок
-    async with db_pool.acquire() as conn:
+    async with db_pool.acquire() as conn:  # Отступ исправлен!
         tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
         
         if not tasks:
@@ -643,6 +642,7 @@ async def manage_tasks(message: Message, state: FSMContext): # <-- ИСПРАВ�
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
             )
+
 
 # Удаление поста, закрепа и всей цепочки промежуточных уведомлений об изменениях (Supabase)
 # Ручное полное удаление задания старостой через меню управления
