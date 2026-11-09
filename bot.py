@@ -20,6 +20,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+import aiohttp
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncpg
@@ -489,12 +490,12 @@ async def send_lesson_reminders():
         today = now.date()
 
         async with db_pool.acquire() as conn:
-            # 1. Помечаем пары, которые уже прошли ранее, чтобы не слать их задним числом
+            # 1. Помечаем пары, которые уже полностью завершились ранее, чтобы не слать их задним числом
             await conn.execute(
                 """
                 UPDATE schedule 
                 SET notified = TRUE 
-                WHERE (lesson_date < $1 OR (lesson_date = $1 AND start_time <= $2)) 
+                WHERE (lesson_date < $1 OR (lesson_date = $1 AND end_time <= $2)) 
                   AND notified = FALSE
                 """,
                 today, now.strftime("%H:%M")
@@ -522,14 +523,15 @@ async def send_lesson_reminders():
 
                 diff_min = (start_dt - now).total_seconds() / 60
 
-                # Отправляем, если до пары осталось от 0 до 11 минут (гарантированное попадание без пропуска секунды)
-                if 0 < diff_min <= 11.0:
+                # Отправляем, если до пары от -5 до 11 минут (за 10 мин до начала или если бот только проснулся)
+                if -5.0 <= diff_min <= 11.0:
+                    header = "⏰ <b>Через 10 минут начнётся пара!</b>" if diff_min > 0 else "⏰ <b>Пара началась!</b>"
                     subj = row['subject']
                     hashtag = get_hashtag_by_subject(subj)
                     text = (
-                        f"⏰ <b>Через 10 минут начнётся пара!</b>\n\n"
+                        f"{header}\n\n"
                         f"📘 <b>Предмет:</b> {clean_html(subj)}\n"
-                        f"🎓 <b>Тип:</b> {row['kind']}\n"
+                        f"🎓 <b>Тип:</b> {clean_html(row['kind'])}\n"
                         f"🕒 <b>Начало:</b> <code>{row['start_time']}</code> – <code>{row['end_time']}</code>\n"
                         f"🔗 <b>Ссылка:</b> <a href='{row['url']}'>Телемост</a>\n\n"
                         f"{hashtag}"
@@ -1037,6 +1039,20 @@ async def process_file(message: Message, state: FSMContext):
 async def handle_web(request):
     return web.Response(text="Бот активен и работает 24/7!")
 
+# Keep-alive фоновая задача для предотвращения засыпания бесплатного тарифа Render
+async def keep_alive_ping():
+    """Пингует /health на собственном Render сервисе, чтобы бесплатный инстанс не уходил в сон."""
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    try:
+        health_url = f"{url.rstrip('/')}/health"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(health_url, timeout=10) as resp:
+                logging.info(f"Keep-alive ping to {health_url}: статус {resp.status}")
+    except Exception as e:
+        logging.warning(f"Keep-alive ping ошибка: {e}")
+
 # --- ЗАПУСК БОТА ---
 async def main():
     global db_pool
@@ -1109,6 +1125,7 @@ async def main():
     scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(send_daily_morning_summary, 'cron', hour=10, minute=0)
     scheduler.add_job(cleanup_daily_morning_summary, 'cron', hour=23, minute=59)
+    scheduler.add_job(keep_alive_ping, 'interval', minutes=10)
     scheduler.start()
 
     logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
@@ -1117,6 +1134,7 @@ async def main():
     if db_pool:
         await update_pinned_post()
         await check_24h_reminders()
+        await send_lesson_reminders()
         # Если бот запустился/перезапустился в 10:00 или позже — проверяем и отправляем утреннюю сводку
         if now_msk().hour >= 10:
             await send_daily_morning_summary()
