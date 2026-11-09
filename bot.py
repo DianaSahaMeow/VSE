@@ -1,24 +1,28 @@
 import asyncio
 import logging
 import os
+import re
+import ssl
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, CallbackQuery
-from aiogram.enums import ParseMode
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from aiogram.enums import ParseMode
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from aiohttp import web
-from aiogram.filters import Command, StateFilter
-
-
-
-
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncpg
-import urllib.parse
-from zoneinfo import ZoneInfo
 
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -28,14 +32,12 @@ def now_msk() -> datetime:
 # --- НАСТРОЙКИ TELEGRAM БОТА ---
 BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
 CHANNEL_ID = -1004330638807  # ID канала с -100
-ADMIN_ID = 987506862         # Ваш личный Telegram ID старосты
+ADMIN_ID = 987506862         # Личный Telegram ID старосты
 PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
-# --- НАСТРОЙКА ЯНДЕКС.ДИСКА ---
 
 # --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE (IPv4 через Session Pooler) ---
 DB_USER = "postgres.tqpaoezbovvanysghfvl"
-DB_PASSWORD = "/-s56B3sbWw+L&L"                       # без %2F, %2B, %26
+DB_PASSWORD = "/-s56B3sbWw+L&L"
 DB_HOST = "aws-1-eu-west-1.pooler.supabase.com"
 DB_PORT = 5432
 DB_NAME = "postgres"
@@ -44,8 +46,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 scheduler = AsyncIOScheduler(timezone=MSK)
-db_pool = None  # <-- ДОБАВЬТЕ ЭТУ СТРОКУ!
-
+db_pool = None
 
 # --- ГЛАВНАЯ КЛАВИАТУРА СТАРОСТЫ ---
 admin_main_keyboard = ReplyKeyboardMarkup(
@@ -53,10 +54,10 @@ admin_main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text='➕ Добавить дедлайн')],
         [KeyboardButton(text='🗂 Управление'), KeyboardButton(text='📢 Важное объявление')]
     ],
-    resize_keyboard=True  # Делает кнопки аккуратными и маленькими
+    resize_keyboard=True
 )
 
-# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ (ТОЛЬКО 2 ГЛАВНЫХ ПРЕДМЕТА) ---
+# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ (2 МОДУЛЬ) ---
 subjects_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text='Молекулярная биология и геномика в растениеводстве')],
@@ -76,18 +77,14 @@ pin_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-
-
-
 # --- СОСТОЯНИЯ ДЛЯ ПОШАГОВОГО ОПРОСА ---
 class Form(StatesGroup):
     subject = State()
     description = State()
     deadline = State()
-     # Для выбора между m_selin и olesyuk
     file = State()
 
-class EditForm(StatesGroup):    # <-- Вот этот класс обязательно должен быть здесь!
+class EditForm(StatesGroup):
     task_id = State()
     choice = State()
     new_value = State()
@@ -96,16 +93,14 @@ class NoticeForm(StatesGroup):
     text = State()
     pin = State()
 
-import re
-
-# Вспомогательная функция для безопасного текста в HTML (Telegram требует экранировать &, <, >)
+# Вспомогательная функция для безопасного текста в HTML
 def clean_html(text):
     if text is None:
         return ""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 # Внутренний ID канала для построения ссылок на сообщения
-CHANNEL_INTERNAL_ID = str(CHANNEL_ID).replace("-100", "")  # "4330638807"
+CHANNEL_INTERNAL_ID = str(CHANNEL_ID).replace("-100", "")
 
 def task_link(message_id: int) -> str:
     """Возвращает ссылку на исходное сообщение задания в канале."""
@@ -129,7 +124,13 @@ def format_submit_url(url: str, is_expired: bool = False) -> str:
     else:
         return f"📥 <b>Куда сдавать:</b> {content}\n"
 
-# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
+def get_hashtag_by_subject(subj: str) -> str:
+    if "Молекулярная биология" in subj: return "#мол_биология"
+    if "Генетические основы" in subj: return "#селекция"
+    if "Семинар наставника" in subj: return "#наставник"
+    return "#инфо"
+
+# --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА ---
 async def update_pinned_post():
     try:
         all_possible_subjects = [
@@ -139,29 +140,31 @@ async def update_pinned_post():
         
         text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
         now = now_msk()
+        two_weeks_ago_str = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
         
         async with db_pool.acquire() as conn:
-            for subj_name in all_possible_subjects:
-                if "Молекулярная биология" in subj_name: hashtag = "#мол_биология"
-                elif "Генетические основы" in subj_name: hashtag = "#селекция"
-                else: hashtag = "#дедлайн"
+            # Находим все уникальные предметы в базе, чтобы не потерять другие предметы
+            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks WHERE deadline >= $1", two_weeks_ago_str)
+            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
+            subjects_to_display = all_possible_subjects + extra_subjects
+
+            for subj_name in subjects_to_display:
+                hashtag = get_hashtag_by_subject(subj_name)
+                if hashtag == "#инфо":
+                    hashtag = "#дедлайн"
                 
-                # Шапка предмета
                 text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
-                # Фильтр: дедлайн еще не прошел ИЛИ прошел менее 14 дней назад
-                two_weeks_ago_str = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
+                
                 subj_tasks = await conn.fetch(
                     "SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 AND deadline >= $2 ORDER BY deadline ASC", 
                     subj_name, two_weeks_ago_str
                 )
 
-                 # Если по предмету вообще нет никаких заданий в базе данных
                 if not subj_tasks:
                     text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
                     text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
                     continue
                     
-                # Запускаем счетчик перед перебором задач предмета
                 for idx, task in enumerate(subj_tasks, start=1):
                     try:
                         desc = clean_html(task['description'])
@@ -174,27 +177,23 @@ async def update_pinned_post():
                         is_expired = task_deadline < now
                         
                         if is_expired:
-                            # Если просрочено — аккуратно зачеркиваем внутренности
                             text += f"❌ <b>(Дедлайн прошел)</b>\n"
                             text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
                             text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
                             text += format_submit_url(url, is_expired=True)
                         else:
-                            # Структурированный вывод с цифрой по порядку
                             text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
                             text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
                             text += format_submit_url(url, is_expired=False)
                         
-                        # Ссылка на исходный пост — для ВСЕХ задач (и активных, и просроченных)
                         if msg_id and msg_id != 0:
                             text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
                         text += f"— — — — — — — — — — — — — —\n"
                     except Exception as e:
                         logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
 
-                text += "\n" # Отступ между блоками предметов
+                text += "\n"
                 
-        # Защита от лимита сообщения Telegram (4096 символов)
         if len(text) > 4090:
             logging.warning(f"Закрепленный пост слишком длинный ({len(text)} символов), сокращаем...")
             text = text[:4085] + "\n..."
@@ -209,18 +208,14 @@ async def update_pinned_post():
     except Exception as e:
         logging.error(f"Глобальная ошибка в update_pinned_post: {e}", exc_info=True)
 
-# --- АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ ПРОСРОЧЕННЫХ ЗАДАНИЙ ЧЕРЕЗ 2 НЕДЕЛИ ПОСЛЕ ДЕДЛАЙНА ---
-# --- АВТОМАТИЧЕСКАЯ ОЧИСТКА БАЗЫ ДАННЫХ В КОНЦЕ КАЖДОГО МОДУЛЯ ---
 # --- АВТОМАТИЧЕСКАЯ ОЧИСТКА В КОНЦЕ МОДУЛЕЙ С РЕДАКТИРОВАНИЕМ ПОСТОВ В КАНАЛЕ ---
 async def clear_old_deadlines():
     try:
         now = now_msk()
-        current_date_str = now.strftime("%m-%d") # Получаем формат "10-26"
+        current_date_str = now.strftime("%m-%d")
         
-        # Даты окончания модулей 
         module_end_dates = ["10-26", "12-21", "03-25", "06-21"]
         
-        # Если сегодня не день окончания модуля — ничего не делаем
         if current_date_str not in module_end_dates:
             logging.info(f"Проверка очистки: сегодня {current_date_str}, ждем конца модуля.")
             return
@@ -228,7 +223,6 @@ async def clear_old_deadlines():
         logging.info(f"📆 Наступил конец модуля ({current_date_str}). Начинаем очистку постов и базы данных...")
         
         async with db_pool.acquire() as conn:
-            # Выбираем абсолютно все задания текущего модуля из базы
             all_module_tasks = await conn.fetch("SELECT id, message_id, edit_message_ids, subject FROM tasks")
             
             for task in all_module_tasks:
@@ -236,10 +230,8 @@ async def clear_old_deadlines():
                 edit_ids_str = task['edit_message_ids']
                 subj_name = task['subject']
                 
-                # Текст, в который превратятся все старые посты в конце модуля
                 clear_text = f"📦 <b>Архив {current_date_str.split('-')[1]} модуля</b>\n📘 Предмет: {clean_html(subj_name)}\n✓ Обучение по модулю завершено."
                 
-                # 1. "Схлопываем" основной пост задания в канале
                 if msg_id and msg_id != 0:
                     try:
                         await bot.edit_message_text(
@@ -247,13 +239,12 @@ async def clear_old_deadlines():
                             chat_id=CHANNEL_ID, 
                             message_id=msg_id, 
                             parse_mode=ParseMode.HTML,
-                            reply_markup=None # Удаляем кнопку "Куда сдавать"
+                            reply_markup=None
                         )
                         logging.info(f"✓ Схлопнут старый пост задания {msg_id}")
                     except Exception as e:
                         logging.error(f"Не удалось отредактировать старый пост {msg_id}: {e}")
                 
-                # 2. "Схлопываем" посты с уведомлениями об изменениях этого задания
                 if edit_ids_str:
                     edit_ids = [int(x) for x in edit_ids_str.split(",") if x.strip()]
                     for e_id in edit_ids:
@@ -267,16 +258,13 @@ async def clear_old_deadlines():
                         except Exception:
                             pass
 
-            # 3. Полностью очищаем таблицу tasks в облаке Supabase под ноль
             await conn.execute("DELETE FROM tasks")
             logging.info("🧹 Таблица tasks в базе данных успешно зачищена.")
             
-        # Обнуляем и очищаем закрепленный пост
         await update_pinned_post()
         
     except Exception as e:
         logging.error(f"Ошибка в clear_old_deadlines: {e}", exc_info=True)
-
 
 # --- ДИАЛОГ ДЛЯ ВАЖНЫХ ОБЪЯВЛЕНИЙ ---
 @router.message(Command("alert"), F.from_user.id == ADMIN_ID)
@@ -296,33 +284,26 @@ async def process_notice_pin(message: Message, state: FSMContext):
     user_data = await state.get_data()
     notice_text = clean_html(user_data['text'])
     
-    # Красивый шаблон для важного объявления
     full_text = (
-        f"🚨 <b>Важное объявление</b> #инфо\n"
-        f"\n"
-        f"{notice_text}\n"
-        f"\n"
+        f"🚨 <b>Важное объявление</b> #инфо\n\n"
+        f"{notice_text}\n\n"
         f"Просьба ознакомиться!"
     )
     
     try:
-        # Публикуем в канал
         msg = await bot.send_message(chat_id=CHANNEL_ID, text=full_text, parse_mode=ParseMode.HTML)
-        
-        # Если староста выбрал "Закрепить"
         if "Да, закрепить" in message.text:
             await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=msg.message_id)
             await message.answer("📢 Объявление опубликовано и закреплено!", reply_markup=ReplyKeyboardRemove())
         else:
             await message.answer("📢 Объявление успешно опубликовано!", reply_markup=ReplyKeyboardRemove())
-            
     except Exception as e:
         logging.error(f"Ошибка отправки объявления: {e}")
         await message.answer("❌ Произошла ошибка при отправке сообщения в канал.", reply_markup=ReplyKeyboardRemove())
         
     await state.clear()
-#пароль 3-430dsQ
-# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ИЗМЕНЕНИЯМИ (ИДЕАЛЬНЫЙ АККУРАТНЫЙ ФОРМАТ) ---
+
+# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ИЗМЕНЕНИЯМИ ---
 async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
     try:
         all_possible_subjects = [
@@ -332,25 +313,26 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
         
         text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
         now = now_msk() 
+        two_weeks_ago_str = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
         
         async with db_pool.acquire() as conn:
-            for subj_name in all_possible_subjects:
-                if "Молекулярная биология" in subj_name: hashtag = "#мол_биология"
-                elif "Генетические основы" in subj_name: hashtag = "#селекция"
-                else: hashtag = "#дедлайн"
+            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks WHERE deadline >= $1", two_weeks_ago_str)
+            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
+            subjects_to_display = all_possible_subjects + extra_subjects
+
+            for subj_name in subjects_to_display:
+                hashtag = get_hashtag_by_subject(subj_name)
+                if hashtag == "#инфо":
+                    hashtag = "#дедлайн"
                 
                 text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
                 
-                # Дальше идет ваш существующий код: subj_tasks = await conn.fetch(...)
-
-                
-                subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 ORDER BY deadline ASC", subj_name)
+                subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 AND deadline >= $2 ORDER BY deadline ASC", subj_name, two_weeks_ago_str)
                 if not subj_tasks:
                     text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
                     text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
                     continue
                     
-                # Запускаем счетчик перед перебором задач предмета
                 for idx, task in enumerate(subj_tasks, start=1):
                     try:
                         t_id = task['id']
@@ -414,8 +396,7 @@ async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, 
     except Exception as e:
         logging.error(f"Глобальная ошибка в update_pinned_post_with_change: {e}", exc_info=True)
 
-
-# --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ПОД SUPABASE ---
+# --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
 async def check_24h_reminders():
     try:
         now = now_msk()
@@ -445,7 +426,7 @@ async def check_24h_reminders():
                     dt_format = task['deadline']
                 
                 alert_text = (
-                    f"🚨 <b>ВНИМАНИЕ! дедлайн через 24 часа</b> 🚨\n\n"
+                    f"🚨 <b>ВНИМАНИЕ! Дедлайн через 24 часа</b> 🚨\n\n"
                     f"📚 <b>Предмет:</b> {clean_html(task['subject'])}\n"
                     f"📝 <b>Что сдать:</b> {clean_html(task['description'])}\n"
                     f"🔥 <b>Время:</b> <code>{dt_format}</code>\n"
@@ -463,29 +444,35 @@ async def check_24h_reminders():
                 else:
                     alert_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_str)}\n"
 
-                # Ссылка на исходный пост с файлом
                 msg_id = task['message_id']
                 if msg_id and msg_id != 0:
                     alert_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Открыть исходное задание</a>\n"
                 
                 try:
                     if task['file_id']:
-                        await bot.send_document(chat_id=CHANNEL_ID, document=task['file_id'], caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                        msg = await bot.send_document(chat_id=CHANNEL_ID, document=task['file_id'], caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
                     else:
-                        await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                        msg = await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
                     
                     await conn.execute("UPDATE tasks SET notified = 1 WHERE id = $1", task_id)
                     logging.info(f"Успешно отправлено напоминание за 24ч для таски {task_id}")
-                                        # Напоминание удалится автоматически ровно через 24 часа (прямо в момент дедлайна)
+                    
+                    # Напоминание удалится в момент дедлайна
                     try:
                         reminder_msg_id = msg.message_id
+                        try:
+                            dead_dt = datetime.strptime(task['deadline'].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
+                        except Exception:
+                            dead_dt = now.replace(tzinfo=MSK) + timedelta(hours=24)
+                        run_date = max(now.replace(tzinfo=MSK) + timedelta(minutes=1), dead_dt)
+                        
                         scheduler.add_job(
                             bot.delete_message, 
                             'date', 
-                            run_date=datetime.now() + timedelta(hours=24), 
+                            run_date=run_date, 
                             kwargs={"chat_id": CHANNEL_ID, "message_id": reminder_msg_id}
                         )
-                        logging.info(f"⏰ Запланировано автоудаление напоминания {reminder_msg_id} через 24 часа")
+                        logging.info(f"⏰ Запланировано автоудаление напоминания {reminder_msg_id} на {run_date}")
                     except Exception as ex:
                         logging.error(f"Не удалось выставить таймер удаления напоминания: {ex}")
 
@@ -494,31 +481,34 @@ async def check_24h_reminders():
     except Exception as e:
         logging.error(f"Глобальная ошибка в check_24h_reminders: {e}", exc_info=True)
 
-def get_hashtag_by_subject(subj: str) -> str:
-    if "Молекулярная биология" in subj: return "#мол_биология"
-    if "Генетические основы" in subj: return "#селекция"
-    if "Семинар наставника" in subj: return "#наставник"
-    return "#инфо"
-
-
-
+# --- УВЕДОМЛЕНИЯ О ПАРАХ ЗА 10 МИНУТ ---
 async def send_lesson_reminders():
     """За 10 минут до пары отправляет уведомление в канал."""
     try:
         now = now_msk()
         today = now.date()
-        date_from = today - timedelta(days=1)
-        date_to   = today + timedelta(days=1)
 
         async with db_pool.acquire() as conn:
+            # 1. Помечаем пары, которые уже прошли ранее, чтобы не слать их задним числом
+            await conn.execute(
+                """
+                UPDATE schedule 
+                SET notified = TRUE 
+                WHERE (lesson_date < $1 OR (lesson_date = $1 AND start_time <= $2)) 
+                  AND notified = FALSE
+                """,
+                today, now.strftime("%H:%M")
+            )
+
+            # 2. Выбираем сегодняшние не отправленные пары
             rows = await conn.fetch(
                 """
                 SELECT id, lesson_date, start_time, end_time, subject, kind, url
                 FROM schedule
-                WHERE lesson_date BETWEEN $1 AND $2
-                  AND notified = FALSE
+                WHERE lesson_date = $1 AND notified = FALSE
+                ORDER BY start_time ASC
                 """,
-                date_from, date_to
+                today
             )
 
             for row in rows:
@@ -532,8 +522,8 @@ async def send_lesson_reminders():
 
                 diff_min = (start_dt - now).total_seconds() / 60
 
-                # Отправляем ровно в окне 9.5–10.5 минут до начала
-                if 9.5 <= diff_min <= 10.5:
+                # Отправляем, если до пары осталось от 0 до 11 минут (гарантированное попадание без пропуска секунды)
+                if 0 < diff_min <= 11.0:
                     subj = row['subject']
                     hashtag = get_hashtag_by_subject(subj)
                     text = (
@@ -567,18 +557,19 @@ async def cleanup_lesson_reminders():
     """Удаляет уведомление о паре строго ПОСЛЕ её завершения."""
     try:
         now = now_msk()
+        today = now.date()
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT id, lesson_date, end_time, message_id 
                 FROM schedule 
-                WHERE notified = TRUE AND message_id > 0
-                """
+                WHERE notified = TRUE AND message_id > 0 AND lesson_date <= $1
+                """,
+                today
             )
 
             for row in rows:
                 try:
-                    # Парсим точное время ОКОНЧАНИЯ пары
                     end_dt = datetime.strptime(
                         f"{row['lesson_date']} {row['end_time']}",
                         "%Y-%m-%d %H:%M"
@@ -586,7 +577,6 @@ async def cleanup_lesson_reminders():
                 except ValueError:
                     continue
 
-                # Если текущее время больше времени окончания пары — удаляем сообщение со ссылкой
                 if now >= end_dt:
                     try:
                         await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
@@ -594,7 +584,6 @@ async def cleanup_lesson_reminders():
                     except Exception as e:
                         logging.error(f"Не удалось удалить уведомление {row['message_id']}: {e}")
                     
-                    # Сбрасываем message_id в базе, чтобы больше не трогать этот пост
                     await conn.execute(
                         "UPDATE schedule SET message_id = 0 WHERE id = $1",
                         row['id']
@@ -602,372 +591,24 @@ async def cleanup_lesson_reminders():
     except Exception as e:
         logging.error(f"Ошибка в cleanup_lesson_reminders: {e}", exc_info=True)
 
-@router.message(Command("manage"), F.from_user.id == ADMIN_ID)
-@router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
-async def manage_tasks(message: Message, state: FSMContext):
-    await state.clear()
-    async with db_pool.acquire() as conn:  # Отступ исправлен!
-        tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
-        
-        if not tasks:
-            await message.answer("В базе данных пока нет заданий.")
-            return
-            
-        await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:", parse_mode=ParseMode.HTML)
-        
-        for t in tasks:
-            t_id = t['id']
-            subj = t['subject']
-            dead = t['deadline']
-            msg_id = t['message_id']
-            
-            try:
-                dt = datetime.strptime(dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-            except Exception:
-                dt = dead
-            
-            rows = []
-            if msg_id and msg_id != 0:
-                rows.append([
-                    InlineKeyboardButton(text="📎 Перейти к посту", url=task_link(msg_id))
-                ])
-            rows.append([
-                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
-                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
-            ])
-            
-            kb = InlineKeyboardMarkup(inline_keyboard=rows)
-            await message.answer(
-                f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}",
-                reply_markup=kb,
-                parse_mode=ParseMode.HTML
-            )
-
-
-# Удаление поста, закрепа и всей цепочки промежуточных уведомлений об изменениях (Supabase)
-# Ручное полное удаление задания старостой через меню управления
-@router.callback_query(F.data.startswith("del_"))
-async def delete_task_callback(callback: CallbackQuery):
-    task_id = int(callback.data.split("_")[1]) # Индекс исправлен
-    
-    async with db_pool.acquire() as conn:
-        res = await conn.fetchrow("SELECT message_id, edit_message_ids FROM tasks WHERE id = $1", task_id)
-        
-        if res:
-            orig_msg_id = res['message_id']
-            edit_msg_ids_str = res['edit_message_ids']
-            
-            # 1. Пробуем физически удалить оригинальный пост из чата
-            if orig_msg_id and orig_msg_id != 0:
-                try:
-                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=orig_msg_id)
-                except Exception as e:
-                    logging.error(f"Ручное удаление: пост {orig_msg_id} старше 48ч или не найден: {e}")
-                    
-            # 2. Пробуем удалить посты с изменениями
-            if edit_msg_ids_str:
-                edit_ids = [int(x) for x in edit_msg_ids_str.split(",") if x.strip()]
-                for e_id in edit_ids:
-                    try:
-                        await bot.delete_message(chat_id=CHANNEL_ID, message_id=e_id)
-                    except Exception:
-                        pass
-                
-        # 3. Удаляем строчку задания из базы данных Supabase
-        await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
-        
-    await callback.answer("Задание удалено!")
-    await callback.message.edit_text("🗑 Задание стёрто из базы и закрепа. Посты в чате удалены (если им не больше 48 часов).")
-    await update_pinned_post()
-
-
-@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"})) #  Теперь поймает любой клик!
-async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if callback.data == "change_desc":
-        await state.update_data(edit_field="description")
-        await callback.message.answer("Введите НОВОЕ описание домашнего задания:")
-    elif callback.data == "change_date":
-        await state.update_data(edit_field="deadline")
-        await callback.message.answer("Введите НОВЫЙ дедлайн (ДД.ММ.ГГГГ ЧЧ:ММ):")
-    elif callback.data == "change_url":
-        await state.update_data(edit_field="submit_url")
-        await callback.message.answer("Укажите НОВОЕ место сдачи (ссылку, почту или Telegram):")
-    await state.set_state(EditForm.new_value)
-# Логика автоматического редактирования старого поста в самом канале
-# Логика автоматического редактирования, перечеркивания и отправки пуш-уведомлений (Supabase)
-@router.message(EditForm.new_value)
-async def process_edit_save(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    task_id = user_data['edit_task_id']
-    field = user_data['edit_field']
-    new_text = message.text
-    
-    async with db_pool.acquire() as conn:
-        # Получаем старые данные из Supabase
-        old_task = await conn.fetchrow("SELECT subject, description, deadline, submit_url, message_id FROM tasks WHERE id = $1", task_id)
-        
-        if not old_task:
-            await message.answer("Ошибка: Задание не найдено.")
-            await state.clear()
-            return
-            
-        subj = old_task['subject']
-        old_desc = old_task['description']
-        old_dead = old_task['deadline']
-        old_url = old_task['submit_url']
-        msg_id = old_task['message_id']
-        
-        if field == "deadline":
-            try:
-                dt = datetime.strptime(new_text, "%d.%m.%Y %H:%M")
-                dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)   # явно МСК
-                new_text = dt.strftime("%Y-%m-%d %H:%M")
-            except ValueError:
-                await message.answer("Неверный формат! Введите ДД.ММ.ГГГГ ЧЧ:ММ:")
-                return
-
-        # Записываем изменения в облачную базу данных в зависимости от поля
-        if field == "deadline":
-            await conn.execute("UPDATE tasks SET deadline = $1, notified = 0 WHERE id = $2", new_text, task_id)
-            final_dead, final_desc, final_url = new_text, old_desc, old_url
-        elif field == "description":
-            await conn.execute("UPDATE tasks SET description = $1 WHERE id = $2", new_text, task_id)
-            final_dead, final_desc, final_url = old_dead, new_text, old_url
-        elif field == "submit_url":
-            await conn.execute("UPDATE tasks SET submit_url = $1 WHERE id = $2", new_text, task_id)
-            final_dead, final_desc, final_url = old_dead, old_desc, new_text
-        
-        # Форматируем даты для текста изменений
-        dt_old_format = datetime.strptime(old_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-        dt_new_format = datetime.strptime(final_dead, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-        
-        if "Молекулярная биология" in subj: hashtag = "#мол_биология"
-        elif "Генетические основы" in subj: hashtag = "#селекция"
-        else: hashtag = "#дедлайн"
-
-        # 1. ТЕКСТ ДЛЯ ОБНОВЛЕНИЯ СТАРОГО ПОСТА В ЛЕНТЕ (С П ПЕРЕЧЕРКИВАНИЕМ)
-        edited_post_text = f"🔄 <b>Задание изменено!</b> {hashtag}\n\n📘 <b>Предмет:</b> {clean_html(subj)}\n"
-        if field == "description":
-            edited_post_text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
-        else:
-            edited_post_text += f"📝 <b>Что сделать:</b> {clean_html(final_desc)}\n"
-        if field == "deadline":
-            edited_post_text += f"⏰ <b>Сдать до:</b> <s>{dt_old_format}</s> ➡️ <code>{dt_new_format}</code>\n"
-        else:
-            edited_post_text += f"⏰ <b>Сдать до:</b> <code>{dt_new_format}</code>\n"
-
-        kb = None
-        if str(final_url).startswith("http"):
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=final_url)]])
-        else:
-            if field == "submit_url":
-                edited_post_text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
-            else:
-                edited_post_text += f"📥 <b>Куда сдавать:</b> {clean_html(final_url)}\n"
-
-        if msg_id and msg_id != 0:
-            try:
-                await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=edited_post_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            except Exception as e:
-                logging.error(f"Не удалось изменить пост {msg_id} в ленте канала: {e}")
-
-        # 2. ОТПРАВЛЯЕМ НОВОЕ ОТДЕЛЬНОЕ СООБЩЕНИЕ УВЕДОМЛЕНИЯ В КАНАЛ
-        # 2. ОТПРАВЛЯЕМ НОВОЕ ОТДЕЛЬНОЕ СООБЩЕНИЕ УВЕДОМЛЕНИЯ В КАНАЛ (С ССЫЛКОЙ)
-        alert_channel_text = f"🔔 <b>Внимание! Задание изменено</b> {hashtag}\n\n📚 <b>Предмет:</b> {clean_html(subj)}\n"
-        if field == "description":
-            alert_channel_text += f"❌ <s>📝 <b>Что сделать было:</b> {clean_html(old_desc)}</s>\n✅ 📝 <b>Что сделать стало:</b> {clean_html(new_text)}\n"
-        elif field == "deadline":
-            alert_channel_text += f"❌ <s>⏰ <b>Сдать до было:</b> {dt_old_format}</s>\n✅ ⏰ <b>Сдать до стало:</b> <code>{dt_new_format}</code>\n"
-        elif field == "submit_url":
-            alert_channel_text += f"❌ <s>📥 <b>Куда сдавать было:</b> {clean_html(old_url)}</s>\n✅ 📥 <b>Куда сдавать стало:</b> {clean_html(new_text)}\n"
-        
-        # Добавляем ссылку на само задание, если она существует
-        if msg_id and msg_id != 0:
-            alert_channel_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Перейти к заданию</a>\n"
-            
-        alert_channel_text += "\n📋 Изменения внесены в закрепленный пост группы!"
-
-        try:
-            msg_alert = await bot.send_message(chat_id=CHANNEL_ID, text=alert_channel_text, parse_mode=ParseMode.HTML)
-            
-            # Получаем текущие сохраненные ID обновлений из базы
-            current_edits_row = await conn.fetchrow("SELECT edit_message_ids FROM tasks WHERE id = $1", task_id)
-            current_edits = current_edits_row['edit_message_ids'] or ""
-            
-            # Дописываем ID нового сообщения через запятую
-            new_edits = f"{current_edits},{msg_alert.message_id}" if current_edits else str(msg_alert.message_id)
-            
-            await conn.execute("UPDATE tasks SET edit_message_ids = $1 WHERE id = $2", new_edits, task_id)
-        except Exception as e:
-            logging.error(f"Ошибка отправки уведомления об изменении: {e}")
-
-    await state.clear()
-    await message.answer("✨ Изменения успешно сохранены! Оригинальный пост переписан, закреп обновлен, уведомление отправлено в канал.", reply_markup=admin_main_keyboard)
-    await update_pinned_post_with_change(task_id, field, old_desc, dt_old_format, old_url)
-    await check_24h_reminders()
-
-# Нажатие на кнопку «Изменить» — выбор, что менять
-@router.callback_query(F.data.startswith("edit_"))
-async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
-    task_id = int(callback.data.split("_")[1])
-    await state.update_data(edit_task_id=task_id)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc")],
-        [InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")],
-        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")] #  Добавили третью кнопку
-    ])
-    
-    await callback.answer()
-    await callback.message.answer("Что именно вы хотите изменить в этом задании?", reply_markup=kb)
-    await state.set_state(EditForm.choice)
-
-
-# --- ПРИВЕТСТВИЕ И АКТИВАЦИЯ КНОПОК ---
-@router.message(Command("start"), F.from_user.id == ADMIN_ID)
-async def cmd_start(message: Message, state: FSMContext):  # <-- Добавили state
-    await state.clear()  # <-- Теперь эта строчка намертво сбрасывает любые зависания при вводе /start!
-    await message.answer(
-        "👋 Привет, староста! Рад приветствовать тебя в панели управления группой.\n\n"
-        "✨ Лови меню быстрых кнопок внизу экрана!", 
-        reply_markup=admin_main_keyboard
-    )
-
-
-# --- ДИАЛОГ СО СТАРОСТОЙ (ДОБАВЛЕНИЕ) ---
-@router.message(Command("add"), F.from_user.id == ADMIN_ID)
-@router.message(F.text == '➕ Добавить дедлайн', F.from_user.id == ADMIN_ID)
-async def start_add(message: Message, state: FSMContext):
-    await state.clear()  # На всякий случай чистим старое состояние перед созданием нового дедлайна
-    await message.answer("Выбери название предмета из списка:", reply_markup=subjects_keyboard)
-    await state.set_state(Form.subject)
-
-# Фильтруем ввод: обрабатываем только нажатие на две правильные кнопки
-@router.message(Form.subject, F.text.in_({
-    'Молекулярная биология и геномика в растениеводстве',
-    'Генетические основы селекционного процесса в растениеводстве и животноводстве'
-}))
-async def process_subject(message: Message, state: FSMContext):
-    await state.update_data(subject=message.text)
-    await message.answer("Опиши, что нужно сделать (какая домашка):", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(Form.description)
-
-# Ловим любой некорректный текст (например, команды /start или /add), если староста не нажал на кнопку
-@router.message(Form.subject)
-async def process_subject_invalid(message: Message):
-    await message.answer("Пожалуйста, выберите предмет строго с помощью кнопок на клавиатуре внизу 👇", reply_markup=subjects_keyboard)
-
-
-@router.message(Form.description)
-async def process_desc(message: Message, state: FSMContext):
-    await state.update_data(description=message.text)
-    await message.answer("Введи дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.11.2026 18:00)")
-    await state.set_state(Form.deadline)
-
-@router.message(Form.deadline)
-async def process_deadline(message: Message, state: FSMContext):
-    try:
-        # Проверяем и сохраняем дату
-        dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
-        dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)   # явно МСК
-        await state.update_data(deadline=dt.strftime("%Y-%m-%d %H:%M"))
-        
-        # Для всех предметов 2 модуля по умолчанию ставим "Уточняется"
-        await state.update_data(submit_url="Уточняется (будет добавлено позже)")
-        await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
-        await state.set_state(Form.file)
-            
-    except ValueError:
-        await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
-
-
-@router.message(Form.file)
-async def process_file(message: Message, state: FSMContext):
-    data = await state.get_data()
-    file_id = None
-    
-    if message.document:
-        file_id = message.document.file_id
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-
-    # --- ПУБЛИКАЦИЯ В КАНАЛ ---
-    dt_display = datetime.strptime(data['deadline'], "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-    
-    subj_html = clean_html(data['subject'])
-    desc_html = clean_html(data['description'])
-    url_val = data['submit_url']
-    
-    # Автоматически определяем нужный хештег по ключевым словам
-    # Автоматически определяем нужный хештег по ключевым словам
-    if "Молекулярная биология" in data['subject']:
-        hashtag = "#мол_биология"
-    elif "Генетические основы" in data['subject']:
-        hashtag = "#селекция"
-    else:
-        hashtag = "#дедлайн"
-
-    
-    new_task_text = (
-        f"📚 <b>Новое задание в расписании</b> {hashtag}\n\n"  #  Теперь заголовок будет реально жирным!
-        f"📘 <b>Предмет:</b> {subj_html}\n"
-        f"📝 <b>Что сделать:</b> {desc_html}\n"
-        f"⏰ <b>Сдать до:</b> <code>{dt_display}</code>\n"
-    )
-
-    
-    kb = None
-    if str(url_val).startswith("http"):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
-    else:
-        new_task_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_val)}\n"
-
-    
-    posted_message_id = 0
-    try:
-        if file_id:
-            msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            posted_message_id = msg.message_id
-        else:
-            msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            posted_message_id = msg.message_id
-    except Exception as e:
-        logging.error(f"Ошибка отправки в канал: {e}")
-
-
-    # --- СОХРАНЯЕМ В БАЗУ ДАННЫХ ВМЕСТЕ С ID ПОСТА ---
-    # --- СОХРАНЯЕМ В ОБЛАЧНУЮ БАЗУ SUPABASE ---
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id) VALUES ($1, $2, $3, $4, $5, $6)",
-            data['subject'], data['description'], data['deadline'], data['submit_url'], file_id, posted_message_id
-        )
-
-    await state.clear()
-    await message.answer("🎉 Задание успешно добавлено в базу данных!", reply_markup=admin_main_keyboard)
-    await update_pinned_post()
-    await check_24h_reminders()
-
-
-# --- ЗАПУСК БОТА ---
-# Хэндлер для веб-страницы (чтобы хостинг видел, что бот живой)
-async def handle_web(request):
-    return web.Response(text="Бот активен и работает 24/7!")
-
+# --- УТРЕННЯЯ СВОДКА ---
 async def send_daily_morning_summary():
-    """Каждое утро отправляет сводку пар и дедлайнов на текущий день."""
+    """Каждое утро (в 10:00 или при старте после 10:00) отправляет сводку пар и дедлайнов на текущий день."""
     try:
         now = now_msk()
-        today_date_str = now.strftime("%Y-%m-%d")  # "2026-11-05"
+        today_date_str = now.strftime("%Y-%m-%d")
         today_display = now.strftime("%d.%m.%Y")
         
-        # Заголовки сводки
-        text = f" <b>Сводка на сегодня ({today_display})</b> \n\n"
-        
         async with db_pool.acquire() as conn:
+            # Проверяем, не отправлялась ли уже сводка на сегодня
+            already_sent_date = await conn.fetchval(
+                "SELECT value FROM bot_metadata WHERE key = 'morning_summary_date'"
+            )
+            if already_sent_date == today_date_str:
+                logging.info(f"Утренняя сводка на {today_date_str} уже была отправлена.")
+                return
+
             # 1. ПОЛУЧАЕМ ПАРЫ НА СЕГОДНЯ
-            # Выбираем только те, что имеют ссылки, как вы просили
             rows_lessons = await conn.fetch(
                 """
                 SELECT start_time, end_time, subject, kind, url 
@@ -978,6 +619,7 @@ async def send_daily_morning_summary():
                 now.date()
             )
             
+            text = f"☀️ <b>Сводка на сегодня ({today_display})</b>\n\n"
             text += "📅 <b>Расписание пар на сегодня:</b>\n"
             if rows_lessons:
                 for idx, row in enumerate(rows_lessons, start=1):
@@ -992,10 +634,9 @@ async def send_daily_morning_summary():
             else:
                 text += "🎉 Пар со ссылками на сегодня нет! Можно отдохнуть.\n"
                 
-            text += "\n"  # Отступ
+            text += "\n"
             
             # 2. ПОЛУЧАЕМ ДЕДЛАЙНЫ НА СЕГОДНЯ
-            # Ищем дедлайны, которые попадают на сегодняшние сутки
             today_start = f"{today_date_str} 00:00"
             today_end = f"{today_date_str} 23:59"
             
@@ -1029,121 +670,466 @@ async def send_daily_morning_summary():
             else:
                 text += "✅ Сегодня ничего сдавать не нужно. Чистый день!\n"
                 
-        # Отправляем готовую сводку в канал
-        msg_summary = await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        logging.info("Утренняя сводка успешно сгенерирована и отправлена.")
-        
-        # Запоминаем ID сообщения утренней сводки в расписании на сегодня, чтобы удалить его ночью
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE schedule SET message_id = $1 WHERE lesson_date = $2", msg_summary.message_id, now.date())
-        
+            msg_summary = await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            logging.info(f"Утренняя сводка успешно отправлена (msg_id={msg_summary.message_id}).")
+            
+            # Сохраняем в bot_metadata (не трогая schedule.message_id!)
+            await conn.execute(
+                """
+                INSERT INTO bot_metadata (key, value) VALUES ('morning_summary_date', $1)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                today_date_str
+            )
+            await conn.execute(
+                """
+                INSERT INTO bot_metadata (key, value) VALUES ('morning_summary_msg_id', $1)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                str(msg_summary.message_id)
+            )
     except Exception as e:
         logging.error(f"Ошибка при формировании утренней сводки: {e}", exc_info=True)
 
 async def cleanup_daily_morning_summary():
     """В конце дня (в 23:59) удаляет утреннюю сводку, чтобы не захламлять ленту."""
     try:
-        now = now_msk()
         async with db_pool.acquire() as conn:
-            # Ищем message_id сводки за сегодняшний день
-            row = await conn.fetchrow("SELECT DISTINCT message_id FROM schedule WHERE lesson_date = $1 AND message_id > 0", now.date())
-            if row and row['message_id']:
+            msg_id_val = await conn.fetchval("SELECT value FROM bot_metadata WHERE key = 'morning_summary_msg_id'")
+            if msg_id_val:
                 try:
-                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=row['message_id'])
-                    logging.info(f"Утренняя сводка (msg_id={row['message_id']}) успешно удалена в конце дня.")
+                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=int(msg_id_val))
+                    logging.info(f"Утренняя сводка (msg_id={msg_id_val}) успешно удалена в конце дня.")
                 except Exception as e:
                     logging.error(f"Не удалось удалить утреннюю сводку: {e}")
+                await conn.execute("DELETE FROM bot_metadata WHERE key = 'morning_summary_msg_id'")
     except Exception as e:
         logging.error(f"Ошибка в cleanup_daily_morning_summary: {e}", exc_info=True)
 
+# --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ ---
+@router.message(Command("manage"), F.from_user.id == ADMIN_ID)
+@router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
+async def manage_tasks(message: Message, state: FSMContext):
+    await state.clear()
+    async with db_pool.acquire() as conn:
+        tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
+        
+        if not tasks:
+            await message.answer("В базе данных пока нет заданий.")
+            return
+            
+        await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:", parse_mode=ParseMode.HTML)
+        
+        for t in tasks:
+            t_id = t['id']
+            subj = t['subject']
+            dead = t['deadline']
+            msg_id = t['message_id']
+            
+            try:
+                dt = datetime.strptime(dead.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                dt = dead
+            
+            rows = []
+            if msg_id and msg_id != 0:
+                rows.append([
+                    InlineKeyboardButton(text="📎 Перейти к посту", url=task_link(msg_id))
+                ])
+            rows.append([
+                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
+            ])
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+            await message.answer(
+                f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}",
+                reply_markup=kb,
+                parse_mode=ParseMode.HTML
+            )
+
+# Удаление задания старостой
+@router.callback_query(F.data.startswith("del_"))
+async def delete_task_callback(callback: CallbackQuery):
+    task_id = int(callback.data.split("_")[1])
+    
+    async with db_pool.acquire() as conn:
+        res = await conn.fetchrow("SELECT message_id, edit_message_ids FROM tasks WHERE id = $1", task_id)
+        
+        if res:
+            orig_msg_id = res['message_id']
+            edit_msg_ids_str = res['edit_message_ids']
+            
+            if orig_msg_id and orig_msg_id != 0:
+                try:
+                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=orig_msg_id)
+                except Exception as e:
+                    logging.error(f"Ручное удаление: пост {orig_msg_id} старше 48ч или не найден: {e}")
+                    
+            if edit_msg_ids_str:
+                edit_ids = [int(x) for x in edit_msg_ids_str.split(",") if x.strip()]
+                for e_id in edit_ids:
+                    try:
+                        await bot.delete_message(chat_id=CHANNEL_ID, message_id=e_id)
+                    except Exception:
+                        pass
+                
+        await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+        
+    await callback.answer("Задание удалено!")
+    await callback.message.edit_text("🗑 Задание стёрто из базы и закрепа. Посты в чате удалены.")
+    await update_pinned_post()
+
+@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"}))
+async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data == "change_desc":
+        await state.update_data(edit_field="description")
+        await callback.message.answer("Введите НОВОЕ описание домашнего задания:")
+    elif callback.data == "change_date":
+        await state.update_data(edit_field="deadline")
+        await callback.message.answer("Введите НОВЫЙ дедлайн (ДД.ММ.ГГГГ ЧЧ:ММ):")
+    elif callback.data == "change_url":
+        await state.update_data(edit_field="submit_url")
+        await callback.message.answer("Укажите НОВОЕ место сдачи (ссылку, почту или Telegram):")
+    await state.set_state(EditForm.new_value)
+
+@router.message(EditForm.new_value)
+async def process_edit_save(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    task_id = user_data['edit_task_id']
+    field = user_data['edit_field']
+    new_text = message.text
+    
+    async with db_pool.acquire() as conn:
+        old_task = await conn.fetchrow("SELECT subject, description, deadline, submit_url, message_id FROM tasks WHERE id = $1", task_id)
+        
+        if not old_task:
+            await message.answer("Ошибка: Задание не найдено.")
+            await state.clear()
+            return
+            
+        subj = old_task['subject']
+        old_desc = old_task['description']
+        old_dead = old_task['deadline']
+        old_url = old_task['submit_url']
+        msg_id = old_task['message_id']
+        
+        if field == "deadline":
+            try:
+                dt = datetime.strptime(new_text.strip(), "%d.%m.%Y %H:%M")
+                dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)
+                new_text = dt.strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                await message.answer("Неверный формат! Введите ДД.ММ.ГГГГ ЧЧ:ММ:")
+                return
+
+        if field == "deadline":
+            await conn.execute("UPDATE tasks SET deadline = $1, notified = 0 WHERE id = $2", new_text, task_id)
+            final_dead, final_desc, final_url = new_text, old_desc, old_url
+        elif field == "description":
+            await conn.execute("UPDATE tasks SET description = $1 WHERE id = $2", new_text, task_id)
+            final_dead, final_desc, final_url = old_dead, new_text, old_url
+        elif field == "submit_url":
+            await conn.execute("UPDATE tasks SET submit_url = $1 WHERE id = $2", new_text, task_id)
+            final_dead, final_desc, final_url = old_dead, old_desc, new_text
+        
+        dt_old_format = datetime.strptime(old_dead.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+        dt_new_format = datetime.strptime(final_dead.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+        
+        hashtag = get_hashtag_by_subject(subj)
+        if hashtag == "#инфо":
+            hashtag = "#дедлайн"
+
+        # 1. Обновляем старый пост в ленте
+        edited_post_text = f"🔄 <b>Задание изменено!</b> {hashtag}\n\n📘 <b>Предмет:</b> {clean_html(subj)}\n"
+        if field == "description":
+            edited_post_text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
+        else:
+            edited_post_text += f"📝 <b>Что сделать:</b> {clean_html(final_desc)}\n"
+        if field == "deadline":
+            edited_post_text += f"⏰ <b>Сдать до:</b> <s>{dt_old_format}</s> ➡️ <code>{dt_new_format}</code>\n"
+        else:
+            edited_post_text += f"⏰ <b>Сдать до:</b> <code>{dt_new_format}</code>\n"
+
+        kb = None
+        if str(final_url).startswith("http"):
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=final_url)]])
+        else:
+            if field == "submit_url":
+                edited_post_text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
+            else:
+                edited_post_text += f"📥 <b>Куда сдавать:</b> {clean_html(final_url)}\n"
+
+        if msg_id and msg_id != 0:
+            try:
+                await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=edited_post_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logging.error(f"Не удалось изменить пост {msg_id} в ленте канала: {e}")
+
+        # 2. Отправляем уведомление об изменении в канал
+        alert_channel_text = f"🔔 <b>Внимание! Задание изменено</b> {hashtag}\n\n📚 <b>Предмет:</b> {clean_html(subj)}\n"
+        if field == "description":
+            alert_channel_text += f"❌ <s>📝 <b>Что сделать было:</b> {clean_html(old_desc)}</s>\n✅ 📝 <b>Что сделать стало:</b> {clean_html(new_text)}\n"
+        elif field == "deadline":
+            alert_channel_text += f"❌ <s>⏰ <b>Сдать до было:</b> {dt_old_format}</s>\n✅ ⏰ <b>Сдать до стало:</b> <code>{dt_new_format}</code>\n"
+        elif field == "submit_url":
+            alert_channel_text += f"❌ <s>📥 <b>Куда сдавать было:</b> {clean_html(old_url)}</s>\n✅ 📥 <b>Куда сдавать стало:</b> {clean_html(new_text)}\n"
+        
+        if msg_id and msg_id != 0:
+            alert_channel_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Перейти к заданию</a>\n"
+            
+        alert_channel_text += "\n📋 Изменения внесены в закрепленный пост группы!"
+
+        try:
+            msg_alert = await bot.send_message(chat_id=CHANNEL_ID, text=alert_channel_text, parse_mode=ParseMode.HTML)
+            current_edits_row = await conn.fetchrow("SELECT edit_message_ids FROM tasks WHERE id = $1", task_id)
+            current_edits = current_edits_row['edit_message_ids'] or ""
+            new_edits = f"{current_edits},{msg_alert.message_id}" if current_edits else str(msg_alert.message_id)
+            await conn.execute("UPDATE tasks SET edit_message_ids = $1 WHERE id = $2", new_edits, task_id)
+        except Exception as e:
+            logging.error(f"Ошибка отправки уведомления об изменении: {e}")
+
+    await state.clear()
+    await message.answer("✨ Изменения успешно сохранены! Оригинальный пост переписан, закреп обновлен, уведомление отправлено в канал.", reply_markup=admin_main_keyboard)
+    await update_pinned_post_with_change(task_id, field, old_desc, dt_old_format, old_url)
+    await check_24h_reminders()
+
+# Нажатие на кнопку «Изменить»
+@router.callback_query(F.data.startswith("edit_"))
+async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split("_")[1])
+    await state.update_data(edit_task_id=task_id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc")],
+        [InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")],
+        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")]
+    ])
+    
+    await callback.answer()
+    await callback.message.answer("Что именно вы хотите изменить в этом задании?", reply_markup=kb)
+    await state.set_state(EditForm.choice)
+
+# --- КОМАНДЫ /start И /cancel ---
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=admin_main_keyboard if message.from_user.id == ADMIN_ID else ReplyKeyboardRemove())
+
+@router.message(Command("start"), F.from_user.id == ADMIN_ID)
+async def cmd_start_admin(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "👋 Привет, староста! Рад приветствовать тебя в панели управления группой.\n\n"
+        "✨ Лови меню быстрых кнопок внизу экрана!", 
+        reply_markup=admin_main_keyboard
+    )
+
+@router.message(Command("start"))
+async def cmd_start_user(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "👋 Привет! Я бот группы.\n\n"
+        "📌 Актуальные дедлайны и ссылки на пары публикуются в канале группы.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+# --- ДОБАВЛЕНИЕ ДЕДЛАЙНА ---
+@router.message(Command("add"), F.from_user.id == ADMIN_ID)
+@router.message(F.text == '➕ Добавить дедлайн', F.from_user.id == ADMIN_ID)
+async def start_add(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выбери название предмета из списка:", reply_markup=subjects_keyboard)
+    await state.set_state(Form.subject)
+
+@router.message(Form.subject, F.text.in_({
+    'Молекулярная биология и геномика в растениеводстве',
+    'Генетические основы селекционного процесса в растениеводстве и животноводстве'
+}))
+async def process_subject(message: Message, state: FSMContext):
+    await state.update_data(subject=message.text)
+    await message.answer("Опиши, что нужно сделать (какая домашка):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Form.description)
+
+@router.message(Form.subject)
+async def process_subject_invalid(message: Message):
+    if message.text and message.text.startswith("/"):
+        return
+    await message.answer("Пожалуйста, выберите предмет строго с помощью кнопок на клавиатуре внизу 👇", reply_markup=subjects_keyboard)
+
+@router.message(Form.description)
+async def process_desc(message: Message, state: FSMContext):
+    await state.update_data(description=message.text)
+    await message.answer("Введи дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.11.2026 18:00)")
+    await state.set_state(Form.deadline)
+
+@router.message(Form.deadline)
+async def process_deadline(message: Message, state: FSMContext):
+    try:
+        dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+        dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)
+        await state.update_data(deadline=dt.strftime("%Y-%m-%d %H:%M"))
+        
+        await state.update_data(submit_url="Уточняется (будет добавлено позже)")
+        await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+        await state.set_state(Form.file)
+            
+    except ValueError:
+        await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
+
+@router.message(Form.file)
+async def process_file(message: Message, state: FSMContext):
+    data = await state.get_data()
+    file_id = None
+    
+    if message.document:
+        file_id = message.document.file_id
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+
+    dt_display = datetime.strptime(data['deadline'], "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+    
+    subj_html = clean_html(data['subject'])
+    desc_html = clean_html(data['description'])
+    url_val = data['submit_url']
+    
+    hashtag = get_hashtag_by_subject(data['subject'])
+    if hashtag == "#инфо":
+        hashtag = "#дедлайн"
+    
+    new_task_text = (
+        f"📚 <b>Новое задание в расписании</b> {hashtag}\n\n"
+        f"📘 <b>Предмет:</b> {subj_html}\n"
+        f"📝 <b>Что сделать:</b> {desc_html}\n"
+        f"⏰ <b>Сдать до:</b> <code>{dt_display}</code>\n"
+    )
+
+    kb = None
+    if str(url_val).startswith("http"):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
+    else:
+        new_task_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_val)}\n"
+
+    posted_message_id = 0
+    try:
+        if file_id:
+            msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            posted_message_id = msg.message_id
+        else:
+            msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            posted_message_id = msg.message_id
+    except Exception as e:
+        logging.error(f"Ошибка отправки в канал: {e}")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            data['subject'], data['description'], data['deadline'], data['submit_url'], file_id, posted_message_id
+        )
+
+    await state.clear()
+    await message.answer("🎉 Задание успешно добавлено в базу данных!", reply_markup=admin_main_keyboard)
+    await update_pinned_post()
+    await check_24h_reminders()
+
+# Хэндлер для веб-страницы Render
+async def handle_web(request):
+    return web.Response(text="Бот активен и работает 24/7!")
 
 # --- ЗАПУСК БОТА ---
 async def main():
     global db_pool
     dp.include_router(router)
 
-    # 1. МГНОВЕННЫЙ ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ RENDER (Чтобы пройти Port Scan)
-    # Создаем веб-сервер, чтобы Render видел активность и не гасил бота
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-    app.router.add_get("/health", handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
+    # 1. Запуск веб-сервера для Render (чтобы пройти Port Scan)
+    try:
+        app = web.Application()
+        app.router.add_get("/", handle_web)
+        app.router.add_get("/health", handle_web)
+        runner = web.AppRunner(app)
+        await runner.setup()
 
-    # Берем порт, который требует Render (по умолчанию 10000)
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logging.info(f"Веб-сервер успешно запущен на порту {port}")
+        port = int(os.environ.get("PORT", 10000))
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logging.info(f"Веб-сервер успешно запущен на порту {port}")
+    except Exception as e:
+        logging.error(f"Ошибка запуска веб-сервера: {e}")
 
-
-
-
-    # 2. ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ SUPABASE
-    import ssl
+    # 2. Подключение к базе данных Supabase с повторными попытками
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
 
-    try:
-        db_pool = await asyncpg.create_pool(
-            user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT,
-            database=DB_NAME, ssl=ssl_context, min_size=1, max_size=5,
-            max_inactive_connection_lifetime=60.0, timeout=15, command_timeout=60
-        )
+    db_pool = None
+    for attempt in range(1, 6):
+        try:
+            logging.info(f"Подключение к Supabase (попытка {attempt}/5)...")
+            db_pool = await asyncpg.create_pool(
+                user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT,
+                database=DB_NAME, ssl=ssl_context, min_size=1, max_size=5,
+                max_inactive_connection_lifetime=60.0, timeout=30, command_timeout=60
+            )
 
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
-                id SERIAL PRIMARY KEY, subject TEXT, description TEXT, deadline TEXT,
-                submit_url TEXT, file_id TEXT, notified INTEGER DEFAULT 0,
-                message_id INTEGER DEFAULT 0, edit_message_ids TEXT DEFAULT ''
-            )''')
-            await conn.execute('''
-            CREATE TABLE IF NOT EXISTS schedule (
-                id SERIAL PRIMARY KEY, lesson_date DATE NOT NULL, start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL,
-                url TEXT NOT NULL, notified BOOLEAN DEFAULT FALSE, message_id BIGINT DEFAULT 0,
-                module INTEGER DEFAULT 1
-            )''')
-            version = await conn.fetchval("SELECT version()")
-        logging.info(f"✅ Подключение к Supabase OK: {version}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка подключения к БД: {e!r}")
-        return
+            async with db_pool.acquire() as conn:
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id SERIAL PRIMARY KEY, subject TEXT, description TEXT, deadline TEXT,
+                    submit_url TEXT, file_id TEXT, notified INTEGER DEFAULT 0,
+                    message_id INTEGER DEFAULT 0, edit_message_ids TEXT DEFAULT ''
+                )''')
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS schedule (
+                    id SERIAL PRIMARY KEY, lesson_date DATE NOT NULL, start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL,
+                    url TEXT NOT NULL, notified BOOLEAN DEFAULT FALSE, message_id BIGINT DEFAULT 0,
+                    module INTEGER DEFAULT 1
+                )''')
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )''')
+                version = await conn.fetchval("SELECT version()")
+            logging.info(f"✅ Подключение к Supabase OK: {version}")
+            break
+        except Exception as e:
+            logging.error(f"❌ Ошибка подключения к БД (попытка {attempt}/5): {e!r}")
+            if attempt < 5:
+                await asyncio.sleep(5)
+            else:
+                logging.error("Не удалось подключиться к БД после 5 попыток.")
 
-    # 3. НАСТРОЙКА ПЛАНИРОВЩИКА СЛУЖБ
-    # 3. НАСТРОЙКА ПЛАНИРОВЩИКА СЛУЖБ
+    # 3. Настройка задач планировщика
     scheduler.add_job(check_24h_reminders, 'interval', minutes=5)
     scheduler.add_job(update_pinned_post, 'interval', minutes=5)
     scheduler.add_job(clear_old_deadlines, 'cron', hour=3, minute=0)
     scheduler.add_job(send_lesson_reminders, 'interval', minutes=1)
-    scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1) # Проверка каждую минуту
+    scheduler.add_job(cleanup_lesson_reminders, 'interval', minutes=1)
     scheduler.add_job(send_daily_morning_summary, 'cron', hour=10, minute=0)
-    
-    # ДОБАВИТЬ ЭТУ СТРОКУ (Удаление сводки каждый день в 23:59):
     scheduler.add_job(cleanup_daily_morning_summary, 'cron', hour=23, minute=59)
-    
     scheduler.start()
 
     logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
 
-    # Первичный запуск проверок
-    await update_pinned_post()
-    await check_24h_reminders()
+    # Первичный запуск проверок при старте
+    if db_pool:
+        await update_pinned_post()
+        await check_24h_reminders()
+        # Если бот запустился/перезапустился в 10:00 или позже — проверяем и отправляем утреннюю сводку
+        if now_msk().hour >= 10:
+            await send_daily_morning_summary()
 
-    # Запускаем поллинг как фоновую задачу, чтобы не блокировать завершение инициализации деплоя Render
-    await bot.delete_webhook(drop_pending_updates=True)
-    asyncio.create_task(dp.start_polling(bot))
-    logging.info("🤖 Бот успешно перешел в режим Polling и слушает команды!")
-    
-    # Удерживаем main запущенным
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        pass
-
-
+    # 4. Запуск Long Polling с защитой от сбоев и переподключением
+    await bot.delete_webhook(drop_pending_updates=False)
+    logging.info("🤖 Запуск Polling...")
+    while True:
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        except Exception as e:
+            logging.error(f"⚠️ Ошибка в процессе Polling: {e!r}. Переподключение через 5 сек...", exc_info=True)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
