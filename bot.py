@@ -1,10 +1,11 @@
 import asyncio
+import io
 import logging
 import os
 import re
 import ssl
+import uuid
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
@@ -16,32 +17,47 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    MenuButtonDefault,
+    MenuButtonWebApp,
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 import aiohttp
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncpg
 
-MSK = ZoneInfo("Europe/Moscow")
-
-def now_msk() -> datetime:
-    return datetime.now(MSK).replace(tzinfo=None)
-
-# --- НАСТРОЙКИ TELEGRAM БОТА ---
-BOT_TOKEN = "8653801306:AAFfKR9d9D8bLYEArAHxov40_bi4b-N9BOM"
-CHANNEL_ID = -1004330638807  # ID канала с -100
-ADMIN_ID = 987506862         # Личный Telegram ID старосты
-PINNED_MESSAGE_ID = 3        # ID закрепленного сообщения
-
-# --- НАСТРОЙКИ ОБЛАЧНОЙ БАЗЫ SUPABASE ---
-DB_USER = "postgres.tqpaoezbovvanysghfvl"
-DB_PASSWORD = "/-s56B3sbWw+L&L"
-DB_HOST = "aws-1-eu-west-1.pooler.supabase.com"
-DB_PORT = 5432
-DB_NAME = "postgres"
+from config import (
+    ADMIN_ID,
+    BOT_TOKEN,
+    CHANNEL_ID,
+    DB_HOST,
+    DB_NAME,
+    DB_PASSWORD,
+    DB_PORT,
+    DB_USER,
+    DEFAULT_SUBJECTS,
+    MSK,
+    clean_html,
+    get_crm_base_url,
+    get_hashtag_by_subject,
+    now_msk,
+    task_link,
+)
+from crm_server import MAX_FILE_BYTES, build_admin_magic_link, create_web_app
+from task_sync import (
+    build_submit_kb,
+    delete_task_completely,
+    get_all_subjects,
+    migrate_schema,
+    publish_task_to_channel,
+    send_task_attachments,
+    sync_task_attachments_in_channel,
+    sync_task_edit_to_channel,
+    update_pinned_post as sync_update_pinned_post,
+)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -49,24 +65,32 @@ router = Router()
 scheduler = AsyncIOScheduler(timezone=MSK)
 db_pool = None
 
+# Буфер для безопасного накопления нескольких файлов / альбомов от пользователя
+_PENDING_FILES: dict[tuple[int, str], list[dict]] = {}
+_PENDING_LOCK = asyncio.Lock()
+
 # --- ГЛАВНАЯ КЛАВИАТУРА СТАРОСТЫ ---
 admin_main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text='➕ Добавить дедлайн')],
-        [KeyboardButton(text='🗂 Управление'), KeyboardButton(text='📢 Важное объявление')]
+        [KeyboardButton(text='🗂 Управление'), KeyboardButton(text='📢 Важное объявление')],
+        [KeyboardButton(text='🌐 CRM Панель')],
     ],
     resize_keyboard=True
 )
 
-# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ (2 МОДУЛЬ) ---
-subjects_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text='Молекулярная биология и геномика в растениеводстве')],
-        [KeyboardButton(text='Генетические основы селекционного процесса в растениеводстве и животноводстве')]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True
-)
+
+def build_subjects_keyboard(subjects: list[str] | None = None) -> ReplyKeyboardMarkup:
+    items = subjects or DEFAULT_SUBJECTS
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=s)] for s in items],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+# --- КЛАВИАТУРА ВЫБОРА ПРЕДМЕТОВ (ПО УМОЛЧАНИЮ) ---
+subjects_keyboard = build_subjects_keyboard()
 
 # --- КЛАВИАТУРА ДЛЯ ВАЖНЫХ УВЕДОМЛЕНИЙ ---
 pin_keyboard = ReplyKeyboardMarkup(
@@ -89,125 +113,67 @@ class EditForm(StatesGroup):
     task_id = State()
     choice = State()
     new_value = State()
+    files = State()
 
 class NoticeForm(StatesGroup):
     text = State()
     pin = State()
 
-# Вспомогательная функция для безопасного текста в HTML
-def clean_html(text):
-    if text is None:
-        return ""
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# Внутренний ID канала для построения ссылок на сообщения
-CHANNEL_INTERNAL_ID = str(CHANNEL_ID).replace("-100", "")
+async def _extract_and_download_file(message: Message) -> tuple[dict | None, str | None]:
+    """Извлекает документ или фото из сообщения и скачивает байты для сохранения в Supabase."""
+    file_id = None
+    file_name = None
+    mime_type = "application/octet-stream"
+    file_size = 0
+    file_kind = "document"
 
-def task_link(message_id: int) -> str:
-    """Возвращает ссылку на исходное сообщение задания в канале."""
-    return f"https://t.me/c/{CHANNEL_INTERNAL_ID}/{message_id}"
-
-def format_submit_url(url: str, is_expired: bool = False) -> str:
-    """Форматирует строку сдачи (ссылка/почта/текст), аккуратно скрывая длинные ссылки."""
-    url_str = str(url or "").strip()
-    match = re.search(r'(https?://\S+)', url_str)
-    if match:
-        actual_url = match.group(1)
-        prefix = url_str[:match.start()].strip(" -:")
-        prefix_text = f"{clean_html(prefix)}: " if prefix else ""
-        link_html = f"<a href='{actual_url}'>Ссылка</a>"
-        content = f"{prefix_text}{link_html}"
+    if message.document:
+        doc = message.document
+        file_id = doc.file_id
+        file_name = doc.file_name or f"document_{doc.file_unique_id}"
+        mime_type = doc.mime_type or "application/octet-stream"
+        file_size = doc.file_size or 0
+        file_kind = "document"
+    elif message.photo:
+        ph = message.photo[-1]
+        file_id = ph.file_id
+        file_name = f"photo_{ph.file_unique_id}.jpg"
+        mime_type = "image/jpeg"
+        file_size = ph.file_size or 0
+        file_kind = "photo"
     else:
-        content = clean_html(url_str)
-        
-    if is_expired:
-        return f"📥 <b>Куда сдавать:</b> <s>{content}</s>\n"
-    else:
-        return f"📥 <b>Куда сдавать:</b> {content}\n"
+        return None, None
 
-def get_hashtag_by_subject(subj: str) -> str:
-    if "Молекулярная биология" in subj: return "#мол_биология"
-    if "Генетические основы" in subj: return "#селекция"
-    if "Семинар наставника" in subj: return "#наставник"
-    return "#инфо"
+    if file_size and file_size > MAX_FILE_BYTES:
+        return None, f"Файл «{file_name}» больше 15 МБ и не может быть сохранён в бесплатную БД (лимит 15 МБ на файл)."
+
+    file_bytes = None
+    try:
+        tg_file = await bot.get_file(file_id)
+        if not tg_file.file_size or tg_file.file_size <= MAX_FILE_BYTES:
+            buf = io.BytesIO()
+            await bot.download_file(tg_file.file_path, destination=buf)
+            raw = buf.getvalue()
+            if len(raw) <= MAX_FILE_BYTES:
+                file_bytes = raw
+                file_size = len(raw)
+    except Exception as exc:
+        logging.warning(f"Не удалось скачать байты файла {file_name} для БД (будет сохранён telegram_file_id): {exc}")
+
+    return {
+        "file_name": file_name,
+        "mime_type": mime_type,
+        "file_size": file_size,
+        "file_data": file_bytes,
+        "telegram_file_id": file_id,
+        "file_kind": file_kind,
+    }, None
 
 # --- ФУНКЦИЯ ОБНОВЛЕНИЯ ЗАКРЕПЛЕННОГО ПОСТА ---
 async def update_pinned_post():
-    try:
-        all_possible_subjects = [
-            'Молекулярная биология и геномика в растениеводстве',
-            'Генетические основы селекционного процесса в растениеводстве и животноводстве'
-        ]
-        
-        text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-        now = now_msk()
-        two_weeks_ago_str = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
-        
-        async with db_pool.acquire() as conn:
-            # Находим все уникальные предметы в базе, чтобы не потерять другие предметы
-            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks WHERE deadline >= $1", two_weeks_ago_str)
-            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
-            subjects_to_display = all_possible_subjects + extra_subjects
-
-            for subj_name in subjects_to_display:
-                hashtag = get_hashtag_by_subject(subj_name)
-                if hashtag == "#инфо":
-                    hashtag = "#дедлайн"
-                
-                text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
-                
-                subj_tasks = await conn.fetch(
-                    "SELECT description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 AND deadline >= $2 ORDER BY deadline ASC", 
-                    subj_name, two_weeks_ago_str
-                )
-
-                if not subj_tasks:
-                    text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
-                    text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
-                    continue
-                    
-                for idx, task in enumerate(subj_tasks, start=1):
-                    try:
-                        desc = clean_html(task['description'])
-                        dead_raw = task['deadline']
-                        url = task['submit_url']
-                        msg_id = task['message_id']
-                        
-                        task_deadline = datetime.strptime(dead_raw.strip(), "%Y-%m-%d %H:%M")
-                        dt = task_deadline.strftime("%d.%m.%Y %H:%M")
-                        is_expired = task_deadline < now
-                        
-                        if is_expired:
-                            text += f"❌ <b>(Дедлайн прошел)</b>\n"
-                            text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
-                            text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
-                            text += format_submit_url(url, is_expired=True)
-                        else:
-                            text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
-                            text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
-                            text += format_submit_url(url, is_expired=False)
-                        
-                        if msg_id and msg_id != 0:
-                            text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
-                        text += f"— — — — — — — — — — — — — —\n"
-                    except Exception as e:
-                        logging.error(f"Ошибка парсинга строки таски в закрепе: {e}")
-
-                text += "\n"
-                
-        if len(text) > 4090:
-            logging.warning(f"Закрепленный пост слишком длинный ({len(text)} символов), сокращаем...")
-            text = text[:4085] + "\n..."
-
-        try:
-            await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception as e:
-            if "message is not modified" in str(e):
-                logging.info("Закрепленный пост проверен: изменений нет.")
-            else:
-                logging.error(f"Ошибка обновления закрепа: {e}")
-    except Exception as e:
-        logging.error(f"Глобальная ошибка в update_pinned_post: {e}", exc_info=True)
+    if db_pool:
+        await sync_update_pinned_post(bot, db_pool)
 
 # --- АВТОМАТИЧЕСКАЯ ОЧИСТКА В КОНЦЕ МОДУЛЕЙ С РЕДАКТИРОВАНИЕМ ПОСТОВ В КАНАЛЕ ---
 async def clear_old_deadlines():
@@ -304,99 +270,6 @@ async def process_notice_pin(message: Message, state: FSMContext):
         
     await state.clear()
 
-# --- ОБНОВЛЕНИЕ ЗАКРЕПЛЕННОГО ПОСТА С ИЗМЕНЕНИЯМИ ---
-async def update_pinned_post_with_change(changed_id, field, old_desc, old_dead, old_url):
-    try:
-        all_possible_subjects = [
-            'Молекулярная биология и геномика в растениеводстве',
-            'Генетические основы селекционного процесса в растениеводстве и животноводстве'
-        ]
-        
-        text = "📌 <b>Актуальные дедлайны</b> 📌\n\n"
-        now = now_msk() 
-        two_weeks_ago_str = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
-        
-        async with db_pool.acquire() as conn:
-            db_subjects = await conn.fetch("SELECT DISTINCT subject FROM tasks WHERE deadline >= $1", two_weeks_ago_str)
-            extra_subjects = [r['subject'] for r in db_subjects if r['subject'] not in all_possible_subjects]
-            subjects_to_display = all_possible_subjects + extra_subjects
-
-            for subj_name in subjects_to_display:
-                hashtag = get_hashtag_by_subject(subj_name)
-                if hashtag == "#инфо":
-                    hashtag = "#дедлайн"
-                
-                text += f"📘 <b>Предмет:</b> {clean_html(subj_name)} {hashtag}\n\n"
-                
-                subj_tasks = await conn.fetch("SELECT id, description, deadline, submit_url, message_id FROM tasks WHERE subject = $1 AND deadline >= $2 ORDER BY deadline ASC", subj_name, two_weeks_ago_str)
-                if not subj_tasks:
-                    text += f"🔸 📝 <b>Что сделать:</b> Активных заданий нет 🎉\n"
-                    text += f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n\n"
-                    continue
-                    
-                for idx, task in enumerate(subj_tasks, start=1):
-                    try:
-                        t_id = task['id']
-                        desc = clean_html(task['description'])
-                        dead_raw = task['deadline']
-                        url = task['submit_url']
-                        msg_id = task['message_id']
-                        
-                        task_deadline = datetime.strptime(dead_raw.strip(), "%Y-%m-%d %H:%M")
-                        dt = task_deadline.strftime("%d.%m.%Y %H:%M")
-                        is_expired = task_deadline < now
-                        
-                        if t_id == changed_id:
-                            text += "🔄 <b>ЗАДАНИЕ ИЗМЕНЕНО СТАРОСТОЙ:</b>\n"
-                            if field == "description":
-                                text += f"{idx}. 📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{desc}</b>\n"
-                            else:
-                                text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
-                                
-                            if field == "deadline":
-                                text += f"⏰ <b>Сдать до:</b> <s>{old_dead}</s> ➡️ <code>{dt}</code>\n"
-                            else:
-                                text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
-                                
-                            if field == "submit_url":
-                                text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ {format_submit_url(url, is_expired=False).replace('📥 <b>Куда сдавать:</b> ', '')}"
-                            else:
-                                text += format_submit_url(url, is_expired=False)
-                            if msg_id and msg_id != 0:
-                                text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
-                            text += f"— — — — — — — — — — — — — —\n"
-                        else:
-                            if is_expired:
-                                text += f"❌ <b>(Дедлайн прошел)</b>\n"
-                                text += f"{idx}. 📝 <b>Что сделать:</b> <s>{desc}</s>\n"
-                                text += f"⏰ <b>Сдать до:</b> <s>{dt}</s>\n"
-                                text += format_submit_url(url, is_expired=True)
-                            else:
-                                text += f"{idx}. 📝 <b>Что сделать:</b> {desc}\n"
-                                text += f"⏰ <b>Сдать до:</b> <code>{dt}</code>\n"
-                                text += format_submit_url(url, is_expired=False)
-                                    
-                        if msg_id and msg_id != 0:
-                            text += f"🔗 <a href='{task_link(msg_id)}'>📎 Открыть задание</a>\n"
-                        text += f"— — — — — — — — — — — — — —\n"
-                    except Exception as e:
-                        logging.error(f"Ошибка правок закрепа: {e}")
-
-                text += "\n"
-                
-        if len(text) > 4090:
-            text = text[:4085] + "\n..."
-            
-        try:
-            await bot.edit_message_text(text=text, chat_id=CHANNEL_ID, message_id=PINNED_MESSAGE_ID, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception as e:
-            if "message is not modified" in str(e):
-                logging.info("Закрепленный пост проверен: изменений нет.")
-            else:
-                logging.error(f"Ошибка правок закрепа: {e}")
-    except Exception as e:
-        logging.error(f"Глобальная ошибка в update_pinned_post_with_change: {e}", exc_info=True)
-
 # --- ПРОВЕРКА ДЕДЛАЙНОВ ЗА СУТКИ ---
 async def check_24h_reminders():
     try:
@@ -413,7 +286,7 @@ async def check_24h_reminders():
                 """
                 SELECT id, subject, description, deadline, submit_url, file_id, message_id 
                 FROM tasks 
-                WHERE deadline <= $1 AND deadline > $2 AND notified = 0
+                WHERE deadline <= $1 AND deadline > $2 AND notified = 0 AND COALESCE(is_published, TRUE) = TRUE
                 ORDER BY deadline ASC
                 """,
                 deadline_threshold, now_str
@@ -450,30 +323,43 @@ async def check_24h_reminders():
                     alert_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Открыть исходное задание</a>\n"
                 
                 try:
-                    if task['file_id']:
-                        msg = await bot.send_document(chat_id=CHANNEL_ID, document=task['file_id'], caption=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-                    else:
-                        msg = await bot.send_message(chat_id=CHANNEL_ID, text=alert_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-                    
+                    msg = await bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=alert_text,
+                        reply_markup=kb,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                    attach_ids = await send_task_attachments(
+                        bot, conn, task_id, reply_to_msg_id=msg.message_id
+                    )
+                    if not attach_ids and task['file_id']:
+                        fallback_doc = await bot.send_document(
+                            chat_id=CHANNEL_ID,
+                            document=task['file_id'],
+                            reply_to_message_id=msg.message_id,
+                        )
+                        attach_ids.append(fallback_doc.message_id)
+
                     await conn.execute("UPDATE tasks SET notified = 1 WHERE id = $1", task_id)
-                    logging.info(f"Успешно отправлено напоминание за 24ч для таски {task_id}")
+                    logging.info(f"Успешно отправлено напоминание за 24ч для таски {task_id} (вложений: {len(attach_ids)})")
                     
-                    # Напоминание удалится в момент дедлайна
+                    # Напоминание и вложения удалятся в момент дедлайна
                     try:
-                        reminder_msg_id = msg.message_id
                         try:
                             dead_dt = datetime.strptime(task['deadline'].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
                         except Exception:
                             dead_dt = now.replace(tzinfo=MSK) + timedelta(hours=24)
                         run_date = max(now.replace(tzinfo=MSK) + timedelta(minutes=1), dead_dt)
                         
-                        scheduler.add_job(
-                            bot.delete_message, 
-                            'date', 
-                            run_date=run_date, 
-                            kwargs={"chat_id": CHANNEL_ID, "message_id": reminder_msg_id}
-                        )
-                        logging.info(f"⏰ Запланировано автоудаление напоминания {reminder_msg_id} на {run_date}")
+                        for del_mid in [msg.message_id] + attach_ids:
+                            scheduler.add_job(
+                                bot.delete_message, 
+                                'date', 
+                                run_date=run_date, 
+                                kwargs={"chat_id": CHANNEL_ID, "message_id": del_mid}
+                            )
+                        logging.info(f"⏰ Запланировано автоудаление напоминания {msg.message_id} на {run_date}")
                     except Exception as ex:
                         logging.error(f"Не удалось выставить таймер удаления напоминания: {ex}")
 
@@ -708,83 +594,202 @@ async def cleanup_daily_morning_summary():
     except Exception as e:
         logging.error(f"Ошибка в cleanup_daily_morning_summary: {e}", exc_info=True)
 
+_SEEN_MEDIA_GROUPS: set[tuple[int, str, str]] = set()
+
+
+async def _append_pending_file(
+    user_id: int, flow_id: str, file_rec: dict, media_group_id: str | None = None
+) -> tuple[int, bool]:
+    """Потокобезопасно добавляет файл в буфер (включая альбомы из нескольких файлов)."""
+    async with _PENDING_LOCK:
+        key = (user_id, flow_id)
+        lst = _PENDING_FILES.setdefault(key, [])
+        lst.append(file_rec)
+        total = len(lst)
+        is_first_in_group = True
+        if media_group_id:
+            mg_key = (user_id, flow_id, str(media_group_id))
+            if mg_key in _SEEN_MEDIA_GROUPS:
+                is_first_in_group = False
+            else:
+                _SEEN_MEDIA_GROUPS.add(mg_key)
+        return total, is_first_in_group
+
+
+async def _pop_pending_files(user_id: int, flow_id: str | None) -> list[dict]:
+    async with _PENDING_LOCK:
+        if not flow_id:
+            return []
+        for k in [k for k in _SEEN_MEDIA_GROUPS if k[0] == user_id and k[1] == flow_id]:
+            _SEEN_MEDIA_GROUPS.discard(k)
+        return _PENDING_FILES.pop((user_id, flow_id), [])
+
+
+async def _clear_user_pending(user_id: int):
+    async with _PENDING_LOCK:
+        for k in [k for k in _PENDING_FILES if k[0] == user_id]:
+            _PENDING_FILES.pop(k, None)
+        for k in [k for k in _SEEN_MEDIA_GROUPS if k[0] == user_id]:
+            _SEEN_MEDIA_GROUPS.discard(k)
+
+
+def _build_crm_message(is_admin: bool) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Формирует сообщение и кнопки для входа в CRM (Mini App + браузер)."""
+    base_url = get_crm_base_url()
+    has_https = base_url.startswith("https://")
+    rows = []
+
+    if is_admin:
+        if has_https:
+            rows.append([InlineKeyboardButton(text="📱 Открыть CRM (Mini App)", web_app=WebAppInfo(url=f"{base_url}/crm"))])
+            magic = build_admin_magic_link()
+            if magic:
+                rows.append([InlineKeyboardButton(text="🌐 Открыть в браузере (Автовход)", url=magic)])
+            text = (
+                "🚀 <b>CRM-панель группы готова!</b>\n\n"
+                "• <b>Mini App</b> открывается прямо внутри Telegram без пароля.\n"
+                "• <b>В браузере</b> можно открыть с ПК по кнопке автовхода (ссылка действует 7 дней).\n\n"
+                "В CRM можно загружать расписание из CSV, крепить много файлов к заданиям, "
+                "вести базу текстов и конспектов по предметам и делиться доступом с одногруппниками."
+            )
+        else:
+            port = int(os.environ.get("PORT", 10000))
+            local_url = f"{base_url}/crm" if base_url else f"http://localhost:{port}/crm"
+            text = (
+                "🛠 <b>CRM-панель запущена локально</b>\n\n"
+                f"Адрес для браузера: <code>{clean_html(local_url)}</code>\n"
+                "После деплоя на Render появится кнопка Mini App и ссылка быстрого автовхода."
+            )
+    else:
+        if has_https:
+            rows.append([InlineKeyboardButton(text="📱 Открыть CRM (Mini App)", web_app=WebAppInfo(url=f"{base_url}/crm"))])
+            rows.append([InlineKeyboardButton(text="🌐 Открыть в браузере", url=f"{base_url}/crm")])
+            text = (
+                "🎓 <b>Учебная CRM-панель группы</b>\n\n"
+                "Здесь собраны актуальное расписание и ссылки на Телемост, "
+                "дедлайны, прикреплённые файлы и конспекты по предметам.\n\n"
+                "Через кнопку <b>Mini App</b> вход выполняется автоматически."
+            )
+        else:
+            text = (
+                "🎓 <b>Учебная CRM-панель</b> пока работает в локальном режиме. "
+                "Актуальные дедлайны и пары публикуются в канале группы."
+            )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+    return text, kb
+
+
 # --- ПАНЕЛЬ УПРАВЛЕНИЯ ЗАДАНИЯМИ ---
 @router.message(Command("manage"), F.from_user.id == ADMIN_ID)
 @router.message(F.text == '🗂 Управление', F.from_user.id == ADMIN_ID)
 async def manage_tasks(message: Message, state: FSMContext):
     await state.clear()
+    await _clear_user_pending(message.from_user.id)
+    if not db_pool:
+        await message.answer("⚠️ База данных сейчас недоступна.")
+        return
     async with db_pool.acquire() as conn:
-        tasks = await conn.fetch("SELECT id, subject, deadline, message_id FROM tasks ORDER BY deadline ASC")
-        
+        tasks = await conn.fetch(
+            """
+            SELECT t.id, t.subject, t.description, t.deadline, t.message_id,
+                   (SELECT count(*) FROM task_files tf WHERE tf.task_id = t.id) AS files_count
+            FROM tasks t
+            ORDER BY t.deadline ASC
+            """
+        )
+
         if not tasks:
             await message.answer("В базе данных пока нет заданий.")
             return
-            
+
         await message.answer("🗂 <b>Список заданий в базе:</b>\nВыберите действие:", parse_mode=ParseMode.HTML)
-        
+
         for t in tasks:
             t_id = t['id']
             subj = t['subject']
+            desc_raw = str(t['description'] or '').strip()
+            short_desc = (desc_raw[:75] + "…") if len(desc_raw) > 75 else desc_raw
             dead = t['deadline']
             msg_id = t['message_id']
-            
+            f_cnt = t['files_count'] or 0
+
             try:
                 dt = datetime.strptime(dead.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
             except Exception:
                 dt = dead
-            
+
             rows = []
             if msg_id and msg_id != 0:
-                rows.append([
-                    InlineKeyboardButton(text="📎 Перейти к посту", url=task_link(msg_id))
-                ])
+                rows.append([InlineKeyboardButton(text="📎 Перейти к посту", url=task_link(msg_id))])
             rows.append([
                 InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{t_id}"),
-                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}")
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{t_id}"),
             ])
-            
+
             kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await message.answer(
-                f"📘 <b>{clean_html(subj)}</b>\n⏰ Дедлайн: {dt}",
+                f"📘 <b>{clean_html(subj)}</b>\n"
+                f"📝 {clean_html(short_desc)}\n"
+                f"⏰ Дедлайн: {dt}\n"
+                f"📎 Файлов: {f_cnt} шт.",
                 reply_markup=kb,
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
             )
 
+
 # Удаление задания старостой
-@router.callback_query(F.data.startswith("del_"))
+@router.callback_query(F.data.startswith("del_"), F.from_user.id == ADMIN_ID)
 async def delete_task_callback(callback: CallbackQuery):
     task_id = int(callback.data.split("_")[1])
-    
-    async with db_pool.acquire() as conn:
-        res = await conn.fetchrow("SELECT message_id, edit_message_ids FROM tasks WHERE id = $1", task_id)
-        
-        if res:
-            orig_msg_id = res['message_id']
-            edit_msg_ids_str = res['edit_message_ids']
-            
-            if orig_msg_id and orig_msg_id != 0:
-                try:
-                    await bot.delete_message(chat_id=CHANNEL_ID, message_id=orig_msg_id)
-                except Exception as e:
-                    logging.error(f"Ручное удаление: пост {orig_msg_id} старше 48ч или не найден: {e}")
-                    
-            if edit_msg_ids_str:
-                edit_ids = [int(x) for x in edit_msg_ids_str.split(",") if x.strip()]
-                for e_id in edit_ids:
-                    try:
-                        await bot.delete_message(chat_id=CHANNEL_ID, message_id=e_id)
-                    except Exception:
-                        pass
-                
-        await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
-        
+    if db_pool:
+        await delete_task_completely(bot, db_pool, task_id)
     await callback.answer("Задание удалено!")
-    await callback.message.edit_text("🗑 Задание стёрто из базы и закрепа. Посты в чате удалены.")
-    await update_pinned_post()
+    await callback.message.edit_text("🗑 Задание стёрто из базы и закрепа. Посты и вложения в канале удалены.")
 
-@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url"}))
+
+@router.callback_query(F.data.in_({"change_desc", "change_date", "change_url", "change_files"}), F.from_user.id == ADMIN_ID)
 async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    if callback.data == "change_files":
+        data = await state.get_data()
+        task_id = data.get("edit_task_id")
+        if not task_id or not db_pool:
+            await callback.message.answer("❌ Задание или база данных не найдены.")
+            await state.clear()
+            return
+        flow_id = f"edit_{uuid.uuid4().hex[:8]}"
+        await _clear_user_pending(callback.from_user.id)
+        async with _PENDING_LOCK:
+            _PENDING_FILES[(callback.from_user.id, flow_id)] = []
+
+        async with db_pool.acquire() as conn:
+            existing = await conn.fetch(
+                "SELECT id, file_name, file_size FROM task_files WHERE task_id = $1 ORDER BY id ASC",
+                task_id,
+            )
+
+        await state.update_data(edit_flow_id=flow_id, clear_old_files=False)
+        files_text = "\n".join(
+            f"• {clean_html(r['file_name'])} ({round((r['file_size'] or 0) / 1024)} КБ)"
+            for r in existing
+        ) or "<i>Пока нет прикреплённых файлов</i>"
+
+        btns = []
+        if existing:
+            btns.append([InlineKeyboardButton(text="🗑 Удалить старые файлы при сохранении", callback_data="edit_files_clear")])
+        btns.append([InlineKeyboardButton(text="✅ Сохранить и обновить пост", callback_data="edit_files_save")])
+        await callback.message.answer(
+            f"📎 <b>Управление файлами задания</b>\n\n"
+            f"<b>Сейчас прикреплено:</b>\n{files_text}\n\n"
+            f"Отправь один или несколько файлов (документы, архивы, фото или альбом), чтобы добавить их к заданию. "
+            f"Когда закончишь — нажми «✅ Сохранить и обновить пост».",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+            parse_mode=ParseMode.HTML,
+        )
+        await state.set_state(EditForm.files)
+        return
+
     if callback.data == "change_desc":
         await state.update_data(edit_field="description")
         await callback.message.answer("Введите НОВОЕ описание домашнего задания:")
@@ -796,27 +801,133 @@ async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Укажите НОВОЕ место сдачи (ссылку, почту или Telegram):")
     await state.set_state(EditForm.new_value)
 
-@router.message(EditForm.new_value)
+
+@router.callback_query(EditForm.files, F.data == "edit_files_clear", F.from_user.id == ADMIN_ID)
+async def process_edit_files_clear(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(clear_old_files=True)
+    await callback.answer("Старые файлы будут удалены после сохранения")
+    await callback.message.answer(
+        "🗑 Старые файлы помечены к удалению. Отправь новые файлы или нажми «✅ Сохранить и обновить пост».",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✅ Сохранить и обновить пост", callback_data="edit_files_save")]]
+        ),
+    )
+
+
+@router.callback_query(EditForm.files, F.data == "edit_files_save", F.from_user.id == ADMIN_ID)
+async def process_edit_files_save_cb(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await _finalize_edit_files(callback.message, state, callback.from_user.id)
+
+
+@router.message(EditForm.files, F.from_user.id == ADMIN_ID)
+async def process_edit_files_msg(message: Message, state: FSMContext):
+    data = await state.get_data()
+    flow_id = data.get("edit_flow_id")
+    if not flow_id:
+        await state.clear()
+        return
+
+    if message.text and message.text.strip().lower() in {"готово", "сохранить", "все", "всё"}:
+        await _finalize_edit_files(message, state, message.from_user.id)
+        return
+
+    file_rec, err = await _extract_and_download_file(message)
+    if err:
+        await message.answer(f"⚠️ {err}")
+        return
+    if not file_rec:
+        await message.answer(
+            "Пришлите файл/фото или нажмите «✅ Сохранить и обновить пост» (либо /cancel для отмены).",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="✅ Сохранить и обновить пост", callback_data="edit_files_save")]]
+            ),
+        )
+        return
+
+    total, is_first = await _append_pending_file(message.from_user.id, flow_id, file_rec, message.media_group_id)
+    if message.media_group_id and not is_first:
+        return
+    if message.media_group_id:
+        await asyncio.sleep(0.6)
+        async with _PENDING_LOCK:
+            total = len(_PENDING_FILES.get((message.from_user.id, flow_id), []))
+
+    await message.answer(
+        f"📎 Принято новых файлов: <b>{total}</b>.\nМожешь прислать ещё или нажать кнопку ниже:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=f"✅ Сохранить и обновить пост (+{total})", callback_data="edit_files_save")]]
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _finalize_edit_files(message: Message, state: FSMContext, user_id: int):
+    data = await state.get_data()
+    task_id = data.get("edit_task_id")
+    flow_id = data.get("edit_flow_id")
+    clear_old = bool(data.get("clear_old_files"))
+    new_files = await _pop_pending_files(user_id, flow_id)
+    await state.clear()
+
+    if not task_id or not db_pool:
+        await message.answer("⚠️ Ошибка: задание не найдено.", reply_markup=admin_main_keyboard)
+        return
+
+    async with db_pool.acquire() as conn:
+        if clear_old:
+            await conn.execute("DELETE FROM task_files WHERE task_id = $1", task_id)
+            await conn.execute("UPDATE tasks SET file_id = NULL WHERE id = $1", task_id)
+        for f in new_files:
+            await conn.execute(
+                """
+                INSERT INTO task_files (task_id, file_name, mime_type, file_size, file_data, telegram_file_id, file_kind)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                task_id,
+                f["file_name"],
+                f["mime_type"],
+                f["file_size"],
+                f["file_data"],
+                f["telegram_file_id"],
+                f["file_kind"],
+            )
+
+    await sync_task_attachments_in_channel(bot, db_pool, task_id)
+    await message.answer(
+        f"✨ Файлы задания обновлены (добавлено: {len(new_files)} шт.), пост в канале и закреп синхронизированы!",
+        reply_markup=admin_main_keyboard,
+    )
+
+
+@router.message(EditForm.new_value, F.from_user.id == ADMIN_ID)
 async def process_edit_save(message: Message, state: FSMContext):
     user_data = await state.get_data()
     task_id = user_data['edit_task_id']
     field = user_data['edit_field']
     new_text = message.text
-    
+
+    if not new_text:
+        await message.answer("Пожалуйста, отправьте текстовое значение:")
+        return
+
     async with db_pool.acquire() as conn:
-        old_task = await conn.fetchrow("SELECT subject, description, deadline, submit_url, message_id FROM tasks WHERE id = $1", task_id)
-        
-        if not old_task:
-            await message.answer("Ошибка: Задание не найдено.")
+        old_task_row = await conn.fetchrow(
+            "SELECT subject, description, deadline, submit_url, message_id FROM tasks WHERE id = $1",
+            task_id,
+        )
+
+        if not old_task_row:
+            await message.answer("Ошибка: Задание не найдено.", reply_markup=admin_main_keyboard)
             await state.clear()
             return
-            
-        subj = old_task['subject']
-        old_desc = old_task['description']
-        old_dead = old_task['deadline']
-        old_url = old_task['submit_url']
-        msg_id = old_task['message_id']
-        
+
+        old_task_dict = {
+            "description": old_task_row['description'],
+            "deadline": old_task_row['deadline'],
+            "submit_url": old_task_row['submit_url'],
+        }
+
         if field == "deadline":
             try:
                 dt = datetime.strptime(new_text.strip(), "%d.%m.%Y %H:%M")
@@ -825,108 +936,91 @@ async def process_edit_save(message: Message, state: FSMContext):
             except ValueError:
                 await message.answer("Неверный формат! Введите ДД.ММ.ГГГГ ЧЧ:ММ:")
                 return
-
-        if field == "deadline":
             await conn.execute("UPDATE tasks SET deadline = $1, notified = 0 WHERE id = $2", new_text, task_id)
-            final_dead, final_desc, final_url = new_text, old_desc, old_url
         elif field == "description":
             await conn.execute("UPDATE tasks SET description = $1 WHERE id = $2", new_text, task_id)
-            final_dead, final_desc, final_url = old_dead, new_text, old_url
         elif field == "submit_url":
             await conn.execute("UPDATE tasks SET submit_url = $1 WHERE id = $2", new_text, task_id)
-            final_dead, final_desc, final_url = old_dead, old_desc, new_text
-        
-        dt_old_format = datetime.strptime(old_dead.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-        dt_new_format = datetime.strptime(final_dead.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-        
-        hashtag = get_hashtag_by_subject(subj)
-        if hashtag == "#инфо":
-            hashtag = "#дедлайн"
-
-        # 1. Обновляем старый пост в ленте
-        edited_post_text = f"🔄 <b>Задание изменено!</b> {hashtag}\n\n📘 <b>Предмет:</b> {clean_html(subj)}\n"
-        if field == "description":
-            edited_post_text += f"📝 <b>Что сделать:</b> <s>{clean_html(old_desc)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
-        else:
-            edited_post_text += f"📝 <b>Что сделать:</b> {clean_html(final_desc)}\n"
-        if field == "deadline":
-            edited_post_text += f"⏰ <b>Сдать до:</b> <s>{dt_old_format}</s> ➡️ <code>{dt_new_format}</code>\n"
-        else:
-            edited_post_text += f"⏰ <b>Сдать до:</b> <code>{dt_new_format}</code>\n"
-
-        kb = None
-        if str(final_url).startswith("http"):
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=final_url)]])
-        else:
-            if field == "submit_url":
-                edited_post_text += f"📥 <b>Куда сдавать:</b> <s>{clean_html(old_url)}</s> ➡️ <b>{clean_html(new_text)}</b>\n"
-            else:
-                edited_post_text += f"📥 <b>Куда сдавать:</b> {clean_html(final_url)}\n"
-
-        if msg_id and msg_id != 0:
-            try:
-                await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=msg_id, text=edited_post_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            except Exception as e:
-                logging.error(f"Не удалось изменить пост {msg_id} в ленте канала: {e}")
-
-        # 2. Отправляем уведомление об изменении в канал
-        alert_channel_text = f"🔔 <b>Внимание! Задание изменено</b> {hashtag}\n\n📚 <b>Предмет:</b> {clean_html(subj)}\n"
-        if field == "description":
-            alert_channel_text += f"❌ <s>📝 <b>Что сделать было:</b> {clean_html(old_desc)}</s>\n✅ 📝 <b>Что сделать стало:</b> {clean_html(new_text)}\n"
-        elif field == "deadline":
-            alert_channel_text += f"❌ <s>⏰ <b>Сдать до было:</b> {dt_old_format}</s>\n✅ ⏰ <b>Сдать до стало:</b> <code>{dt_new_format}</code>\n"
-        elif field == "submit_url":
-            alert_channel_text += f"❌ <s>📥 <b>Куда сдавать было:</b> {clean_html(old_url)}</s>\n✅ 📥 <b>Куда сдавать стало:</b> {clean_html(new_text)}\n"
-        
-        if msg_id and msg_id != 0:
-            alert_channel_text += f"\n🔗 <a href='{task_link(msg_id)}'>📎 Перейти к заданию</a>\n"
-            
-        alert_channel_text += "\n📋 Изменения внесены в закрепленный пост группы!"
-
-        try:
-            msg_alert = await bot.send_message(chat_id=CHANNEL_ID, text=alert_channel_text, parse_mode=ParseMode.HTML)
-            current_edits_row = await conn.fetchrow("SELECT edit_message_ids FROM tasks WHERE id = $1", task_id)
-            current_edits = current_edits_row['edit_message_ids'] or ""
-            new_edits = f"{current_edits},{msg_alert.message_id}" if current_edits else str(msg_alert.message_id)
-            await conn.execute("UPDATE tasks SET edit_message_ids = $1 WHERE id = $2", new_edits, task_id)
-        except Exception as e:
-            logging.error(f"Ошибка отправки уведомления об изменении: {e}")
 
     await state.clear()
-    await message.answer("✨ Изменения успешно сохранены! Оригинальный пост переписан, закреп обновлен, уведомление отправлено в канал.", reply_markup=admin_main_keyboard)
-    await update_pinned_post_with_change(task_id, field, old_desc, dt_old_format, old_url)
+    await sync_task_edit_to_channel(bot, db_pool, task_id, old_task_dict, notify_channel=True)
+    await message.answer(
+        "✨ Изменения успешно сохранены! Пост переписан, закреп обновлён, уведомление отправлено в канал.",
+        reply_markup=admin_main_keyboard,
+    )
     await check_24h_reminders()
 
+
 # Нажатие на кнопку «Изменить»
-@router.callback_query(F.data.startswith("edit_"))
+@router.callback_query(F.data.startswith("edit_"), F.from_user.id == ADMIN_ID)
 async def edit_task_callback(callback: CallbackQuery, state: FSMContext):
     task_id = int(callback.data.split("_")[1])
     await state.update_data(edit_task_id=task_id)
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Изменить описание", callback_data="change_desc")],
         [InlineKeyboardButton(text="⏰ Изменить дату", callback_data="change_date")],
-        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")]
+        [InlineKeyboardButton(text="📥 Изменить сдачу", callback_data="change_url")],
+        [InlineKeyboardButton(text="📎 Файлы (добавить / заменить)", callback_data="change_files")],
     ])
-    
+
     await callback.answer()
     await callback.message.answer("Что именно вы хотите изменить в этом задании?", reply_markup=kb)
     await state.set_state(EditForm.choice)
 
-# --- КОМАНДЫ /start И /cancel ---
+
+# --- КОМАНДЫ /start, /crm И /cancel ---
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Действие отменено.", reply_markup=admin_main_keyboard if message.from_user.id == ADMIN_ID else ReplyKeyboardRemove())
+    await _clear_user_pending(message.from_user.id)
+    await message.answer(
+        "Действие отменено.",
+        reply_markup=admin_main_keyboard if message.from_user.id == ADMIN_ID else ReplyKeyboardRemove(),
+    )
+
+
+@router.message(Command("id"))
+async def cmd_id(message: Message):
+    uname = f"@{clean_html(message.from_user.username)}" if message.from_user.username else "не задан"
+    await message.answer(
+        f"🆔 Твой Telegram ID: <code>{message.from_user.id}</code>\n"
+        f"👤 Username: {uname}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(Command("crm"), F.from_user.id == ADMIN_ID)
+@router.message(F.text == '🌐 CRM Панель', F.from_user.id == ADMIN_ID)
+async def cmd_crm(message: Message, state: FSMContext):
+    await state.clear()
+    await _clear_user_pending(message.from_user.id)
+    text, kb = _build_crm_message(is_admin=True)
+    await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+@router.message(Command("crm"))
+async def cmd_crm_non_admin(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "📌 Актуальные дедлайны и ссылки на пары публикуются в канале группы.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
 
 @router.message(Command("start"), F.from_user.id == ADMIN_ID)
 async def cmd_start_admin(message: Message, state: FSMContext):
     await state.clear()
+    await _clear_user_pending(message.from_user.id)
+    _, crm_kb = _build_crm_message(is_admin=True)
     await message.answer(
         "👋 Привет, староста! Рад приветствовать тебя в панели управления группой.\n\n"
-        "✨ Лови меню быстрых кнопок внизу экрана!", 
-        reply_markup=admin_main_keyboard
+        "✨ Меню быстрых кнопок внизу экрана. Для управления файлами, расписанием и базой знаний открой /crm.",
+        reply_markup=admin_main_keyboard,
     )
+    if crm_kb:
+        await message.answer("📱 Быстрый вход в CRM-панель (доступно только тебе):", reply_markup=crm_kb)
+
 
 @router.message(Command("start"))
 async def cmd_start_user(message: Message, state: FSMContext):
@@ -934,7 +1028,7 @@ async def cmd_start_user(message: Message, state: FSMContext):
     await message.answer(
         "👋 Привет! Я бот группы.\n\n"
         "📌 Актуальные дедлайны и ссылки на пары публикуются в канале группы.",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 # --- ДОБАВЛЕНИЕ ДЕДЛАЙНА ---
@@ -942,136 +1036,194 @@ async def cmd_start_user(message: Message, state: FSMContext):
 @router.message(F.text == '➕ Добавить дедлайн', F.from_user.id == ADMIN_ID)
 async def start_add(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Выбери название предмета из списка:", reply_markup=subjects_keyboard)
+    await _clear_user_pending(message.from_user.id)
+    subjects = DEFAULT_SUBJECTS
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            subjects = await get_all_subjects(conn)
+    await state.update_data(allowed_subjects=subjects)
+    await message.answer("Выбери название предмета из списка (или напиши своё):", reply_markup=build_subjects_keyboard(subjects))
     await state.set_state(Form.subject)
 
-@router.message(Form.subject, F.text.in_({
-    'Молекулярная биология и геномика в растениеводстве',
-    'Генетические основы селекционного процесса в растениеводстве и животноводстве'
-}))
+
+@router.message(Form.subject)
 async def process_subject(message: Message, state: FSMContext):
-    await state.update_data(subject=message.text)
+    if message.text and message.text.startswith("/"):
+        return
+    subj = (message.text or "").strip()
+    if not subj:
+        await message.answer("Пожалуйста, выберите или введите название предмета 👇")
+        return
+    await state.update_data(subject=subj)
     await message.answer("Опиши, что нужно сделать (какая домашка):", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.description)
 
-@router.message(Form.subject)
-async def process_subject_invalid(message: Message):
-    if message.text and message.text.startswith("/"):
-        return
-    await message.answer("Пожалуйста, выберите предмет строго с помощью кнопок на клавиатуре внизу 👇", reply_markup=subjects_keyboard)
 
 @router.message(Form.description)
 async def process_desc(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Пожалуйста, отправьте текстовое описание задания:")
+        return
     await state.update_data(description=message.text)
     await message.answer("Введи дедлайн в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n(Например: 25.11.2026 18:00)")
     await state.set_state(Form.deadline)
 
+
 @router.message(Form.deadline)
 async def process_deadline(message: Message, state: FSMContext):
     try:
-        dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+        dt = datetime.strptime((message.text or "").strip(), "%d.%m.%Y %H:%M")
         dt = dt.replace(tzinfo=MSK).replace(tzinfo=None)
-        await state.update_data(deadline=dt.strftime("%Y-%m-%d %H:%M"))
-        
-        await state.update_data(submit_url="Уточняется (будет добавлено позже)")
-        await message.answer("Прикрепи файл к этому дедлайну (документ, фото, архив) или напиши словом 'нет', если файла нет:")
+        flow_id = f"add_{uuid.uuid4().hex[:8]}"
+        await _clear_user_pending(message.from_user.id)
+        async with _PENDING_LOCK:
+            _PENDING_FILES[(message.from_user.id, flow_id)] = []
+
+        await state.update_data(
+            deadline=dt.strftime("%Y-%m-%d %H:%M"),
+            submit_url="Уточняется (будет добавлено позже)",
+            task_flow_id=flow_id,
+        )
+        await message.answer(
+            "📎 Прикрепи <b>один или несколько файлов</b> к этому дедлайну "
+            "(документы, фото, архивы или сразу альбом).\n\n"
+            "Когда закончишь — нажми кнопку ниже (или напиши <code>готово</code> / <code>нет</code>):",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⏭ Без файлов / Сохранить", callback_data="task_files_done")]]
+            ),
+            parse_mode=ParseMode.HTML,
+        )
         await state.set_state(Form.file)
-            
     except ValueError:
         await message.answer("Неверный формат даты! Попробуй еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
 
-@router.message(Form.file)
-async def process_file(message: Message, state: FSMContext):
+
+async def _finalize_create_task(message: Message, state: FSMContext, user_id: int):
     data = await state.get_data()
-    file_id = None
-    
-    if message.document:
-        file_id = message.document.file_id
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-
-    dt_display = datetime.strptime(data['deadline'], "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
-    
-    subj_html = clean_html(data['subject'])
-    desc_html = clean_html(data['description'])
-    url_val = data['submit_url']
-    
-    hashtag = get_hashtag_by_subject(data['subject'])
-    if hashtag == "#инфо":
-        hashtag = "#дедлайн"
-    
-    new_task_text = (
-        f"📚 <b>Новое задание в расписании</b> {hashtag}\n\n"
-        f"📘 <b>Предмет:</b> {subj_html}\n"
-        f"📝 <b>Что сделать:</b> {desc_html}\n"
-        f"⏰ <b>Сдать до:</b> <code>{dt_display}</code>\n"
-    )
-
-    kb = None
-    if str(url_val).startswith("http"):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Куда сдавать", url=url_val)]])
-    else:
-        new_task_text += f"📥 <b>Куда сдавать:</b> {clean_html(url_val)}\n"
-
-    posted_message_id = 0
-    try:
-        if file_id:
-            msg = await bot.send_document(chat_id=CHANNEL_ID, document=file_id, caption=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            posted_message_id = msg.message_id
-        else:
-            msg = await bot.send_message(chat_id=CHANNEL_ID, text=new_task_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            posted_message_id = msg.message_id
-    except Exception as e:
-        logging.error(f"Ошибка отправки в канал: {e}")
-
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id) VALUES ($1, $2, $3, $4, $5, $6)",
-            data['subject'], data['description'], data['deadline'], data['submit_url'], file_id, posted_message_id
-        )
-
+    flow_id = data.get("task_flow_id")
+    files = await _pop_pending_files(user_id, flow_id)
     await state.clear()
-    await message.answer("🎉 Задание успешно добавлено в базу данных!", reply_markup=admin_main_keyboard)
-    await update_pinned_post()
+
+    if not db_pool:
+        await message.answer("⚠️ Ошибка: база данных недоступна.", reply_markup=admin_main_keyboard)
+        return
+
+    first_tg_id = next((f["telegram_file_id"] for f in files if f.get("telegram_file_id")), None)
+    async with db_pool.acquire() as conn:
+        task_id = await conn.fetchval(
+            """
+            INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id)
+            VALUES ($1, $2, $3, $4, $5, 0)
+            RETURNING id
+            """,
+            data['subject'],
+            data['description'],
+            data['deadline'],
+            data['submit_url'],
+            first_tg_id,
+        )
+        for f in files:
+            await conn.execute(
+                """
+                INSERT INTO task_files (task_id, file_name, mime_type, file_size, file_data, telegram_file_id, file_kind)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                task_id,
+                f["file_name"],
+                f["mime_type"],
+                f["file_size"],
+                f["file_data"],
+                f["telegram_file_id"],
+                f["file_kind"],
+            )
+
+    await publish_task_to_channel(bot, db_pool, task_id)
+    await message.answer(
+        f"🎉 Задание успешно добавлено в базу и опубликовано в канал (прикреплено файлов: {len(files)})!",
+        reply_markup=admin_main_keyboard,
+    )
     await check_24h_reminders()
 
-# Хэндлер для веб-страницы Render
-async def handle_web(request):
-    return web.Response(text="Бот активен и работает 24/7!")
+
+@router.callback_query(Form.file, F.data == "task_files_done", F.from_user.id == ADMIN_ID)
+async def process_file_done_cb(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await _finalize_create_task(callback.message, state, callback.from_user.id)
+
+
+@router.message(Form.file, F.from_user.id == ADMIN_ID)
+async def process_file(message: Message, state: FSMContext):
+    data = await state.get_data()
+    flow_id = data.get("task_flow_id")
+    if not flow_id:
+        await state.clear()
+        return
+
+    if message.text and message.text.strip().lower() in {"нет", "готово", "сохранить", "пропустить", "все", "всё"}:
+        await _finalize_create_task(message, state, message.from_user.id)
+        return
+
+    file_rec, err = await _extract_and_download_file(message)
+    if err:
+        await message.answer(f"⚠️ {err}")
+        return
+    if not file_rec:
+        await message.answer(
+            "Пришлите файл/фото или нажмите кнопку «✅ Сохранить задание» (либо /cancel для отмены).",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="✅ Сохранить задание", callback_data="task_files_done")]]
+            ),
+        )
+        return
+
+    total, is_first = await _append_pending_file(message.from_user.id, flow_id, file_rec, message.media_group_id)
+    if message.media_group_id and not is_first:
+        return
+    if message.media_group_id:
+        await asyncio.sleep(0.6)
+        async with _PENDING_LOCK:
+            total = len(_PENDING_FILES.get((message.from_user.id, flow_id), []))
+
+    await message.answer(
+        f"📎 Прикреплено файлов: <b>{total}</b>.\nОтправьте ещё файлы или сохраните задание:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=f"✅ Сохранить задание ({total} файл.)", callback_data="task_files_done")]]
+        ),
+        parse_mode=ParseMode.HTML,
+    )
 
 # Keep-alive фоновая задача для предотвращения засыпания бесплатного тарифа Render
 async def keep_alive_ping():
     """Пингует /health на собственном Render сервисе, чтобы бесплатный инстанс не уходил в сон."""
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not url:
+    url = get_crm_base_url()
+    if not url or "localhost" in url or "127.0.0.1" in url:
         return
     try:
-        health_url = f"{url.rstrip('/')}/health"
+        health_url = f"{url}/health"
         async with aiohttp.ClientSession() as session:
             async with session.get(health_url, timeout=10) as resp:
                 logging.info(f"Keep-alive ping to {health_url}: статус {resp.status}")
     except Exception as e:
         logging.warning(f"Keep-alive ping ошибка: {e}")
 
+
 # --- ЗАПУСК БОТА ---
 async def main():
     global db_pool
     dp.include_router(router)
 
-    # 1. Запуск веб-сервера для Render (чтобы пройти Port Scan)
+    # 1. Запуск веб-сервера для Render + CRM API и Mini App
     try:
-        app = web.Application()
-        app.router.add_get("/", handle_web)
-        app.router.add_get("/health", handle_web)
+        app = create_web_app(bot, lambda: db_pool)
         runner = web.AppRunner(app)
         await runner.setup()
 
         port = int(os.environ.get("PORT", 10000))
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
-        logging.info(f"Веб-сервер успешно запущен на порту {port}")
+        logging.info(f"Веб-сервер и CRM запущены на порту {port}")
     except Exception as e:
-        logging.error(f"Ошибка запуска веб-сервера: {e}")
+        logging.error(f"Ошибка запуска веб-сервера: {e}", exc_info=True)
 
     # 2. Подключение к базе данных Supabase с повторными попытками
     ssl_context = ssl.create_default_context()
@@ -1089,26 +1241,9 @@ async def main():
             )
 
             async with db_pool.acquire() as conn:
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id SERIAL PRIMARY KEY, subject TEXT, description TEXT, deadline TEXT,
-                    submit_url TEXT, file_id TEXT, notified INTEGER DEFAULT 0,
-                    message_id INTEGER DEFAULT 0, edit_message_ids TEXT DEFAULT ''
-                )''')
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS schedule (
-                    id SERIAL PRIMARY KEY, lesson_date DATE NOT NULL, start_time TEXT NOT NULL,
-                    end_time TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL,
-                    url TEXT NOT NULL, notified BOOLEAN DEFAULT FALSE, message_id BIGINT DEFAULT 0,
-                    module INTEGER DEFAULT 1
-                )''')
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS bot_metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )''')
+                await migrate_schema(conn)
                 version = await conn.fetchval("SELECT version()")
-            logging.info(f"✅ Подключение к Supabase OK: {version}")
+            logging.info(f"✅ Подключение к Supabase и миграция схемы OK: {version}")
             break
         except Exception as e:
             logging.error(f"❌ Ошибка подключения к БД (попытка {attempt}/5): {e!r}")
@@ -1130,6 +1265,19 @@ async def main():
 
     logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
 
+    # 4. Установка кнопки Menu App (Mini App) ТОЛЬКО для старосты (ADMIN_ID)
+    crm_base = get_crm_base_url()
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        if crm_base.startswith("https://"):
+            await bot.set_chat_menu_button(
+                chat_id=ADMIN_ID,
+                menu_button=MenuButtonWebApp(text="CRM", web_app=WebAppInfo(url=f"{crm_base}/crm")),
+            )
+            logging.info(f"📱 MenuButtonWebApp настроен только для ADMIN_ID={ADMIN_ID} на {crm_base}/crm")
+    except Exception as e:
+        logging.warning(f"Не удалось настроить MenuButton: {e}")
+
     # Первичный запуск проверок при старте
     if db_pool:
         await update_pinned_post()
@@ -1139,7 +1287,7 @@ async def main():
         if now_msk().hour >= 10:
             await send_daily_morning_summary()
 
-    # 4. Запуск Long Polling с защитой от сбоев и переподключением
+    # 5. Запуск Long Polling с защитой от сбоев и переподключением
     await bot.delete_webhook(drop_pending_updates=False)
     logging.info("🤖 Запуск Polling...")
     while True:
@@ -1148,6 +1296,7 @@ async def main():
         except Exception as e:
             logging.error(f"⚠️ Ошибка в процессе Polling: {e!r}. Переподключение через 5 сек...", exc_info=True)
             await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
