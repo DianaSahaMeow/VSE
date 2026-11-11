@@ -1,0 +1,1647 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Учебная CRM • Группа 216</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #f3f5f9;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --text: #111827;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: rgba(37, 99, 235, 0.1);
+      --green: #16a34a;
+      --green-soft: rgba(22, 163, 74, 0.12);
+      --red: #dc2626;
+      --red-soft: rgba(220, 38, 38, 0.1);
+      --amber: #d97706;
+      --amber-soft: rgba(217, 119, 6, 0.12);
+      --radius: 14px;
+      --shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+    }
+
+    html.dark {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface-2: #273449;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --border: #334155;
+      --primary: #3b82f6;
+      --primary-hover: #60a5fa;
+      --primary-soft: rgba(59, 130, 246, 0.16);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.16);
+      --red: #ef4444;
+      --red-soft: rgba(239, 68, 68, 0.16);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.16);
+      --shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding-bottom: 84px;
+    }
+
+    .container { max-width: 1080px; margin: 0 auto; padding: 14px 16px; }
+
+    /* Header */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      box-shadow: var(--shadow);
+    }
+    .topbar-inner {
+      max-width: 1080px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand h1 { font-size: 18px; font-weight: 700; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+    .badge.green { background: var(--green-soft); color: var(--green); }
+    .badge.red { background: var(--red-soft); color: var(--red); }
+    .badge.amber { background: var(--amber-soft); color: var(--amber); }
+    .badge.muted { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+    /* Nav tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin: 14px 0;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 9px 15px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: 0.15s ease;
+    }
+    .tab-btn.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    /* Buttons & Inputs */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 8px 13px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: 0.15s ease;
+    }
+    .btn:hover { border-color: var(--primary); }
+    .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .btn.primary:hover { background: var(--primary-hover); }
+    .btn.green { background: var(--green); color: #fff; border-color: var(--green); }
+    .btn.red { background: var(--red-soft); color: var(--red); border-color: transparent; }
+    .btn.sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    input, select, textarea {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    textarea { min-height: 90px; resize: vertical; }
+    label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+
+    /* Cards & Grids */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 15px;
+      box-shadow: var(--shadow);
+      margin-bottom: 12px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+      gap: 12px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .toolbar > input { flex: 1; min-width: 190px; }
+    .toolbar > select { width: auto; min-width: 180px; max-width: 100%; }
+
+    .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .pill {
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .pill.active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
+
+    /* Files */
+    .files-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+    .file-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+      flex: 1;
+    }
+    .file-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    /* Dropzone */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+    .dropzone.dragover { border-color: var(--primary); background: var(--primary-soft); }
+
+    /* Lessons */
+    .lesson-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .lesson-time { font-weight: 700; font-size: 15px; color: var(--primary); min-width: 100px; }
+    .lesson-info { flex: 1; min-width: 220px; }
+    .lesson-subj { font-weight: 600; font-size: 14px; }
+    .lesson-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      backdrop-filter: blur(2px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 14px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 560px;
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 18px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+    }
+    .modal-title { font-size: 17px; font-weight: 700; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
+    .form-group { margin-bottom: 12px; }
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 540px) { .row-2 { grid-template-columns: 1fr; } }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .checkbox-row input { width: auto; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #111827;
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 200;
+      display: none;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    .toast.show { display: block; }
+
+    /* Login card */
+    .login-wrap {
+      min-height: 85vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .login-card { width: 100%; max-width: 390px; }
+
+    /* Storage bar */
+    .progress-bg { width: 100%; height: 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; margin: 8px 0; }
+    .progress-fill { height: 100%; background: var(--primary); transition: width 0.3s; }
+
+    .pre-text { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+    .hidden { display: none !important; }
+    .muted-text { color: var(--muted); font-size: 13px; }
+    .section-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+
+<div id="loginView" class="login-wrap hidden">
+  <div class="card login-card">
+    <h2 style="margin-bottom: 6px;">📚 Учебная CRM • 216</h2>
+    <p class="muted-text" style="margin-bottom: 16px;">
+      Введите пароль старосты или пароль группы.<br/>
+      В Telegram Mini App вход выполняется автоматически.
+    </p>
+    <div class="form-group">
+      <label for="loginPass">Пароль доступа</label>
+      <input type="password" id="loginPass" placeholder="Введите пароль..." onkeydown="if(event.key==='Enter') doLogin()" />
+    </div>
+    <button class="btn primary" style="width:100%;" onclick="doLogin()">Войти</button>
+    <p id="loginErr" style="color: var(--red); font-size: 13px; margin-top: 8px;"></p>
+  </div>
+</div>
+
+<div id="appView" class="hidden">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>📚 Учебная CRM</h1>
+        <span id="roleBadge" class="badge">Загрузка...</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn sm" onclick="toggleTheme()" title="Сменить тему">🌓</button>
+        <button class="btn sm" onclick="loadBootstrap()" title="Обновить данные">🔄</button>
+        <button id="logoutBtn" class="btn sm hidden" onclick="doLogout()">Выйти</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="schedule" onclick="switchTab('schedule')">📅 Пары и Телемост</button>
+      <button class="tab-btn" data-tab="tasks" onclick="switchTab('tasks')">📌 Задания и Файлы</button>
+      <button class="tab-btn" data-tab="materials" onclick="switchTab('materials')">📚 База знаний</button>
+      <button id="adminTabBtn" class="tab-btn hidden" data-tab="admin" onclick="switchTab('admin')">⚙️ Админка</button>
+    </nav>
+
+    <!-- TAB 1: SCHEDULE -->
+    <section id="tab-schedule">
+      <div class="card">
+        <div class="section-title">
+          <span>🔥 Пары сегодня (<span id="todayStr"></span>)</span>
+          <span class="badge green" id="todayCount">0</span>
+        </div>
+        <div id="todayLessonsContainer"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          <span>🎥 Быстрые ссылки на Телемост</span>
+        </div>
+        <div id="telemostLinksContainer" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          <span>📆 Расписание</span>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;" class="admin-only hidden">
+            <button class="btn sm primary" onclick="openLessonModal()">➕ Добавить пару</button>
+            <button class="btn sm" onclick="switchTab('admin')">📤 Импорт CSV</button>
+          </div>
+        </div>
+        <div class="pill-row">
+          <button class="pill active" onclick="setSchedFilter('upcoming', this)">Предстоящие</button>
+          <button class="pill" onclick="setSchedFilter('all', this)">Все</button>
+          <button class="pill" onclick="setSchedFilter('m2', this)">2 модуль</button>
+          <button class="pill" onclick="setSchedFilter('m3', this)">3 модуль</button>
+          <button class="pill" onclick="setSchedFilter('m4', this)">4 модуль</button>
+        </div>
+        <div class="toolbar">
+          <input type="text" id="schedSearch" placeholder="Поиск по предмету или преподавателю..." oninput="renderSchedule()" />
+          <select id="schedSubjectFilter" onchange="renderSchedule()">
+            <option value="">Все предметы</option>
+          </select>
+        </div>
+        <div id="scheduleListContainer"></div>
+      </div>
+    </section>
+
+    <!-- TAB 2: TASKS -->
+    <section id="tab-tasks" class="hidden">
+      <div class="toolbar">
+        <input type="text" id="taskSearch" placeholder="Поиск по описанию или предмету..." oninput="renderTasks()" />
+        <select id="taskSubjectFilter" onchange="renderTasks()">
+          <option value="">Все предметы</option>
+        </select>
+        <button class="btn primary admin-only hidden" onclick="openTaskModal()">➕ Новое задание</button>
+      </div>
+      <div class="pill-row">
+        <button class="pill active" onclick="setTaskFilter('active', this)">Актуальные</button>
+        <button class="pill" onclick="setTaskFilter('expired', this)">Прошедшие</button>
+        <button class="pill" onclick="setTaskFilter('all', this)">Все</button>
+      </div>
+      <div id="tasksContainer" class="grid"></div>
+    </section>
+
+    <!-- TAB 3: MATERIALS -->
+    <section id="tab-materials" class="hidden">
+      <div class="toolbar">
+        <input type="text" id="matSearch" placeholder="Поиск по текстам, названиям и ссылкам..." oninput="renderMaterials()" />
+        <select id="matSubjectFilter" onchange="renderMaterials()">
+          <option value="">Все предметы</option>
+        </select>
+        <button class="btn primary admin-only hidden" onclick="openMaterialModal()">➕ Добавить материал</button>
+      </div>
+      <div id="materialsContainer" class="grid"></div>
+    </section>
+
+    <!-- TAB 4: ADMIN -->
+    <section id="tab-admin" class="hidden">
+      <div class="grid">
+        <div class="card">
+          <div class="section-title"><span>📥 Загрузка расписания (.csv)</span></div>
+          <p class="muted-text" style="margin-bottom: 10px;">
+            Загрузите выгруженный из таблицы CSV-файл (поддерживается формат университета и простой CSV).
+          </p>
+          <div class="form-group">
+            <label>Модуль по умолчанию (если не указан в файле)</label>
+            <select id="csvDefaultModule">
+              <option value="2">2 модуль</option>
+              <option value="3">3 модуль</option>
+              <option value="4">4 модуль</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <input type="file" id="csvFileInput" accept=".csv,text/csv" />
+          </div>
+          <div class="form-group">
+            <label>Или вставьте текст CSV сюда:</label>
+            <textarea id="csvTextInput" placeholder="Вставьте содержимое CSV..."></textarea>
+          </div>
+          <button class="btn primary" onclick="previewCsv()">👀 Предпросмотр расписания</button>
+          <div id="csvPreviewBox" class="hidden" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+            <p id="csvPreviewStats" style="font-weight: 600; margin-bottom: 8px;"></p>
+            <div class="form-group">
+              <label>Режим импорта</label>
+              <select id="csvImportMode">
+                <option value="add_missing">Добавить недостающие и обновить пересечения</option>
+                <option value="replace_module">Перезаписать выбранный модуль полностью</option>
+              </select>
+            </div>
+            <div id="csvPreviewList" style="max-height: 220px; overflow-y: auto; font-size: 12px; margin-bottom: 10px;"></div>
+            <button class="btn green" onclick="confirmCsvImport()">✅ Загрузить в базу данных</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-title"><span>📢 Важное объявление в канал</span></div>
+          <div class="form-group">
+            <textarea id="broadcastText" placeholder="Введите текст объявления для группы..."></textarea>
+          </div>
+          <label class="checkbox-row" style="margin-bottom: 12px;">
+            <input type="checkbox" id="broadcastPin" /> Закрепить сообщение в канале
+          </label>
+          <button class="btn primary" onclick="sendBroadcast()">📤 Отправить в канал</button>
+
+          <hr style="border:none; border-top:1px solid var(--border); margin: 18px 0;" />
+
+          <div class="section-title"><span>📌 Закреплённый пост и Supabase</span></div>
+          <button class="btn" onclick="refreshPinnedPost()" style="margin-bottom: 14px;">🔄 Обновить закреплённый пост сейчас</button>
+          <div class="muted-text">Использовано места в базе Supabase: <strong id="dbUsageLabel">0 МБ</strong> / 500 МБ</div>
+          <div class="progress-bg"><div id="dbUsageBar" class="progress-fill" style="width: 0%;"></div></div>
+
+          <hr style="border:none; border-top:1px solid var(--border); margin: 18px 0;" />
+
+          <div class="section-title"><span>🔐 Доступ в браузере</span></div>
+          <p class="muted-text" style="margin-bottom: 8px;">Ссылка на CRM: <code id="crmUrlCode">/crm</code></p>
+          <div class="form-group">
+            <label>Пароль для группы (только чтение и скачивание)</label>
+            <input type="text" id="studentPasswordInput" />
+          </div>
+          <div class="form-group">
+            <label>Новый пароль старосты (оставьте пустым, чтобы не менять)</label>
+            <input type="password" id="adminPasswordInput" placeholder="Новый пароль администратора..." />
+          </div>
+          <button class="btn" onclick="savePasswords()">💾 Сохранить пароли</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- MODAL: TASK CREATE / EDIT -->
+<div id="taskModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="taskModalTitle">Новое задание</span>
+      <button class="btn sm" onclick="closeModal('taskModal')">✕</button>
+    </div>
+    <input type="hidden" id="taskEditId" />
+    <div class="form-group">
+      <label>Предмет</label>
+      <select id="taskSubjectSelect" onchange="toggleCustomSubject('taskSubjectSelect', 'taskSubjectCustom')"></select>
+      <input type="text" id="taskSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Введите название нового предмета..." />
+    </div>
+    <div class="form-group">
+      <label>Описание (что нужно сделать)</label>
+      <textarea id="taskDesc" placeholder="Например: выполнить тест и прислать отчёт..."></textarea>
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Дедлайн</label>
+        <input type="datetime-local" id="taskDeadline" />
+      </div>
+      <div class="form-group">
+        <label>Куда сдавать (ссылка / почта / текст)</label>
+        <input type="text" id="taskSubmitUrl" placeholder="Почта, форма или 'Уточняется'" />
+      </div>
+    </div>
+
+    <div id="taskExistingFilesWrap" class="form-group hidden">
+      <label>Уже прикреплённые файлы</label>
+      <div id="taskExistingFilesList" class="files-list"></div>
+    </div>
+
+    <div class="form-group">
+      <label id="taskFilesLabel">Прикрепить файлы (можно несколько штук сразу)</label>
+      <div class="dropzone" id="taskDropzone" onclick="document.getElementById('taskFilesInput').click()">
+        📎 Нажмите или перетащите файлы сюда (PDF, Word, фото, таблицы...)
+        <input type="file" id="taskFilesInput" multiple class="hidden" onchange="onSelectFiles('task', this.files)" />
+      </div>
+      <div id="taskPendingFiles" class="files-list"></div>
+    </div>
+
+    <label id="taskPublishRow" class="checkbox-row" style="margin-bottom: 14px;">
+      <input type="checkbox" id="taskPublishCheck" checked /> <span id="taskPublishLabel">Опубликовать в Telegram-канал и обновить закреп</span>
+    </label>
+
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="closeModal('taskModal')">Отмена</button>
+      <button class="btn primary" id="taskSaveBtn" onclick="saveTask()">💾 Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: LESSON CREATE / EDIT -->
+<div id="lessonModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="lessonModalTitle">Добавить пару</span>
+      <button class="btn sm" onclick="closeModal('lessonModal')">✕</button>
+    </div>
+    <input type="hidden" id="lessonEditId" />
+    <div class="row-2">
+      <div class="form-group">
+        <label>Дата</label>
+        <input type="date" id="lessonDate" />
+      </div>
+      <div class="form-group">
+        <label>Модуль</label>
+        <select id="lessonModule">
+          <option value="1">1 модуль</option>
+          <option value="2" selected>2 модуль</option>
+          <option value="3">3 модуль</option>
+          <option value="4">4 модуль</option>
+        </select>
+      </div>
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Начало (ЧЧ:ММ)</label>
+        <input type="time" id="lessonStart" />
+      </div>
+      <div class="form-group">
+        <label>Конец (ЧЧ:ММ)</label>
+        <input type="time" id="lessonEnd" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Предмет</label>
+      <select id="lessonSubjectSelect" onchange="toggleCustomSubject('lessonSubjectSelect', 'lessonSubjectCustom')"></select>
+      <input type="text" id="lessonSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Название предмета..." />
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Тип</label>
+        <select id="lessonKind">
+          <option value="Лекция">Лекция</option>
+          <option value="Семинар">Семинар</option>
+          <option value="Практика">Практика</option>
+          <option value="Экзамен">Экзамен</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Преподаватель</label>
+        <input type="text" id="lessonTeacher" placeholder="ФИО преподавателя" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Ссылка на Телемост</label>
+      <input type="url" id="lessonUrl" placeholder="https://telemost.360.yandex.ru/j/..." />
+    </div>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="closeModal('lessonModal')">Отмена</button>
+      <button class="btn primary" onclick="saveLesson()">💾 Сохранить пару</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: MATERIAL CREATE / EDIT -->
+<div id="materialModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="matModalTitle">Добавить материал</span>
+      <button class="btn sm" onclick="closeModal('materialModal')">✕</button>
+    </div>
+    <input type="hidden" id="matEditId" />
+    <div class="form-group">
+      <label>Предмет / Раздел</label>
+      <select id="matSubjectSelect" onchange="toggleCustomSubject('matSubjectSelect', 'matSubjectCustom')"></select>
+      <input type="text" id="matSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Название предмета или раздела..." />
+    </div>
+    <div class="form-group">
+      <label>Заголовок</label>
+      <input type="text" id="matTitle" placeholder="Например: Конспект лекции №3 / Шаблон отчёта" />
+    </div>
+    <div class="form-group">
+      <label>Текст / Заметка / Инструкция</label>
+      <textarea id="matContent" style="min-height: 130px;" placeholder="Любые полезные тексты, вопросы, почта преподавателя..."></textarea>
+    </div>
+    <div class="form-group">
+      <label>Внешняя ссылка (необязательно)</label>
+      <input type="url" id="matUrl" placeholder="https://docs.google.com/..." />
+    </div>
+    <div id="matExistingFilesWrap" class="form-group hidden">
+      <label>Прикреплённые файлы</label>
+      <div id="matExistingFilesList" class="files-list"></div>
+    </div>
+    <div class="form-group">
+      <label>Прикрепить файлы (можно несколько)</label>
+      <div class="dropzone" id="matDropzone" onclick="document.getElementById('matFilesInput').click()">
+        📎 Нажмите или перетащите файлы сюда
+        <input type="file" id="matFilesInput" multiple class="hidden" onchange="onSelectFiles('mat', this.files)" />
+      </div>
+      <div id="matPendingFiles" class="files-list"></div>
+    </div>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="closeModal('materialModal')">Отмена</button>
+      <button class="btn primary" id="matSaveBtn" onclick="saveMaterial()">💾 Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: READ FULL MATERIAL -->
+<div id="readMaterialModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="readMatTitle">Материал</span>
+      <button class="btn sm" onclick="closeModal('readMaterialModal')">✕</button>
+    </div>
+    <div style="margin-bottom:10px;"><span id="readMatSubj" class="badge"></span></div>
+    <div id="readMatBody" class="pre-text" style="background: var(--surface-2); padding: 12px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 12px;"></div>
+    <div id="readMatLinkWrap" style="margin-bottom: 12px;"></div>
+    <div id="readMatFiles" class="files-list"></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top: 14px;">
+      <button class="btn" onclick="copyMaterialText()">📋 Скопировать текст</button>
+      <button class="btn primary" onclick="closeModal('readMaterialModal')">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    if (tg.colorScheme === 'dark') document.documentElement.classList.add('dark');
+  } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.documentElement.classList.add('dark');
+  }
+
+  let STATE = {
+    auth: { authenticated: false, role: 'guest', user_id: 0, dl_token: '' },
+    today: '',
+    subjects: [],
+    schedule: [],
+    tasks: [],
+    materials: [],
+    schedFilter: 'upcoming',
+    taskFilter: 'active',
+    pendingTaskFiles: [],
+    pendingMatFiles: [],
+    csvPreviewLessons: [],
+    currentReadText: ''
+  };
+
+  function esc(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function showToast(msg, duration = 2600) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), duration);
+  }
+
+  function toggleTheme() {
+    document.documentElement.classList.toggle('dark');
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return '0 Б';
+    if (bytes < 1024) return bytes + ' Б';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' КБ';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' МБ';
+  }
+
+  function formatDateRu(isoDate) {
+    if (!isoDate) return '';
+    const [y, m, d] = isoDate.split('-');
+    const dateObj = new Date(Number(y), Number(m) - 1, Number(d));
+    const weekdays = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+    return `${d}.${m}.${y} (${weekdays[dateObj.getDay()]})`;
+  }
+
+  function apiHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (tg && tg.initData) {
+      headers['X-Telegram-Init-Data'] = tg.initData;
+    }
+    return headers;
+  }
+
+  async function apiFetch(url, options = {}) {
+    options.headers = apiHeaders(options.headers || {});
+    const res = await fetch(url, options);
+    let data = {};
+    const ctype = res.headers.get('Content-Type') || '';
+    if (ctype.includes('application/json')) {
+      data = await res.json();
+    }
+    if (!res.ok) {
+      throw new Error(data.error || `Ошибка сервера (${res.status})`);
+    }
+    return data;
+  }
+
+  async function initApp() {
+    try {
+      if (tg && tg.initData) {
+        await apiFetch('/api/auth/tg-session', { method: 'POST' });
+      }
+      await loadBootstrap();
+    } catch (e) {
+      document.getElementById('loginView').classList.remove('hidden');
+      document.getElementById('appView').classList.add('hidden');
+    }
+  }
+
+  async function doLogin() {
+    const pw = document.getElementById('loginPass').value;
+    const errEl = document.getElementById('loginErr');
+    errEl.textContent = '';
+    try {
+      await apiFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+      await loadBootstrap();
+    } catch (e) {
+      errEl.textContent = e.message;
+    }
+  }
+
+  async function doLogout() {
+    await apiFetch('/api/auth/logout', { method: 'POST' });
+    location.reload();
+  }
+
+  async function loadBootstrap() {
+    const data = await apiFetch('/api/bootstrap');
+    STATE.auth = data.auth;
+    STATE.today = data.today;
+    STATE.subjects = data.subjects;
+    STATE.schedule = data.schedule;
+    STATE.tasks = data.tasks;
+    STATE.materials = data.materials;
+
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+
+    const isAdmin = STATE.auth.role === 'admin';
+    const badge = document.getElementById('roleBadge');
+    badge.textContent = isAdmin ? '👑 Староста (Админ)' : '🎓 Студент (Просмотр)';
+    badge.className = isAdmin ? 'badge green' : 'badge';
+
+    document.querySelectorAll('.admin-only').forEach(el => {
+      el.classList.toggle('hidden', !isAdmin);
+    });
+    document.getElementById('adminTabBtn').classList.toggle('hidden', !isAdmin);
+    document.getElementById('logoutBtn').classList.toggle('hidden', STATE.auth.method === 'telegram');
+
+    if (isAdmin && data.admin_info) {
+      document.getElementById('studentPasswordInput').value = data.admin_info.student_password || '';
+      document.getElementById('crmUrlCode').textContent = data.admin_info.crm_url || '/crm';
+    }
+    const usedMb = data.db_size_mb || 0;
+    document.getElementById('dbUsageLabel').textContent = `${usedMb} МБ`;
+    document.getElementById('dbUsageBar').style.width = `${Math.min(100, (usedMb / 500) * 100)}%`;
+
+    document.getElementById('todayStr').textContent = formatDateRu(STATE.today);
+
+    populateSubjectSelects();
+    renderSchedule();
+    renderTasks();
+    renderMaterials();
+  }
+
+  function populateSubjectSelects() {
+    const filterIds = ['schedSubjectFilter', 'taskSubjectFilter', 'matSubjectFilter'];
+    filterIds.forEach(id => {
+      const sel = document.getElementById(id);
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">Все предметы</option>' +
+        STATE.subjects.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      sel.value = prev;
+    });
+
+    const modalIds = [
+      { id: 'taskSubjectSelect', allowGeneral: false },
+      { id: 'lessonSubjectSelect', allowGeneral: false },
+      { id: 'matSubjectSelect', allowGeneral: true }
+    ];
+    modalIds.forEach(({ id, allowGeneral }) => {
+      const sel = document.getElementById(id);
+      let opts = STATE.subjects.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      if (allowGeneral && !STATE.subjects.includes('Общее / Организационное')) {
+        opts = `<option value="Общее / Организационное">Общее / Организационное</option>` + opts;
+      }
+      opts += `<option value="__custom__">✍️ Ввести свой предмет...</option>`;
+      sel.innerHTML = opts;
+    });
+  }
+
+  function toggleCustomSubject(selectId, customInputId) {
+    const val = document.getElementById(selectId).value;
+    document.getElementById(customInputId).classList.toggle('hidden', val !== '__custom__');
+  }
+
+  function getSelectedSubject(selectId, customInputId) {
+    const val = document.getElementById(selectId).value;
+    if (val === '__custom__') return document.getElementById(customInputId).value.trim();
+    return val;
+  }
+
+  function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+    ['schedule', 'tasks', 'materials', 'admin'].forEach(t => {
+      document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tabName);
+    });
+  }
+
+  function setSchedFilter(mode, btn) {
+    STATE.schedFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderSchedule();
+  }
+
+  function setTaskFilter(mode, btn) {
+    STATE.taskFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderTasks();
+  }
+
+  function renderSchedule() {
+    const todayLessons = STATE.schedule.filter(l => l.lesson_date === STATE.today);
+    document.getElementById('todayCount').textContent = todayLessons.length;
+    const todayEl = document.getElementById('todayLessonsContainer');
+
+    if (todayLessons.length === 0) {
+      todayEl.innerHTML = '<p class="muted-text">🎉 Сегодня пар нет! Можно заняться дедлайнами или отдохнуть.</p>';
+    } else {
+      todayEl.innerHTML = todayLessons.map(l => renderLessonHtml(l, false)).join('');
+    }
+
+    // Уникальные ссылки на Телемост по предметам
+    const telemostMap = new Map();
+    STATE.schedule.forEach(l => {
+      if (l.url && l.url.includes('telemost') && l.url !== 'https://telemost.yandex.ru') {
+        if (!telemostMap.has(l.subject)) telemostMap.set(l.subject, l.url);
+      }
+    });
+    const tmEl = document.getElementById('telemostLinksContainer');
+    if (telemostMap.size === 0) {
+      tmEl.innerHTML = '<span class="muted-text">Ссылки появятся после загрузки расписания.</span>';
+    } else {
+      tmEl.innerHTML = Array.from(telemostMap.entries()).map(([subj, url]) =>
+        `<a class="btn sm green" href="${esc(url)}" target="_blank">🎥 ${esc(subj.length > 42 ? subj.slice(0, 40) + '…' : subj)}</a>`
+      ).join('');
+    }
+
+    // Полный список расписания с фильтрами
+    const search = document.getElementById('schedSearch').value.toLowerCase();
+    const subjFilter = document.getElementById('schedSubjectFilter').value;
+
+    const filtered = STATE.schedule.filter(l => {
+      if (STATE.schedFilter === 'upcoming' && l.lesson_date < STATE.today) return false;
+      if (STATE.schedFilter === 'm2' && Number(l.module) !== 2) return false;
+      if (STATE.schedFilter === 'm3' && Number(l.module) !== 3) return false;
+      if (STATE.schedFilter === 'm4' && Number(l.module) !== 4) return false;
+      if (subjFilter && l.subject !== subjFilter) return false;
+      if (search && !(`${l.subject} ${l.teacher} ${l.kind}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    const listEl = document.getElementById('scheduleListContainer');
+    if (filtered.length === 0) {
+      listEl.innerHTML = '<p class="muted-text">Ничего не найдено.</p>';
+      return;
+    }
+
+    // Группировка по дате
+    const byDate = {};
+    filtered.forEach(l => {
+      (byDate[l.lesson_date] = byDate[l.lesson_date] || []).push(l);
+    });
+
+    listEl.innerHTML = Object.keys(byDate).map(dt => `
+      <div style="margin-bottom: 14px;">
+        <div style="font-weight:700; font-size:14px; margin-bottom:6px; color: var(--muted);">
+          📅 ${formatDateRu(dt)} ${dt === STATE.today ? '<span class="badge green">Сегодня</span>' : ''}
+        </div>
+        ${byDate[dt].map(l => renderLessonHtml(l, true)).join('')}
+      </div>
+    `).join('');
+  }
+
+  function renderLessonHtml(l, showAdminBtns) {
+    const isAdmin = STATE.auth.role === 'admin' && showAdminBtns;
+    const hasSpecificUrl = l.url && l.url.startsWith('http');
+    return `
+      <div class="lesson-row">
+        <div class="lesson-time">${esc(l.start_time)} – ${esc(l.end_time)}</div>
+        <div class="lesson-info">
+          <div class="lesson-subj">${esc(l.subject)}</div>
+          <div class="lesson-meta">
+            <span class="badge muted">${esc(l.kind)}</span>
+            ${l.teacher ? `<span>👨‍🏫 ${esc(l.teacher)}</span>` : ''}
+          </div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          ${hasSpecificUrl ? `<a class="btn sm green" href="${esc(l.url)}" target="_blank">🎥 Телемост</a>` : ''}
+          ${isAdmin ? `<button class="btn sm" onclick="openLessonModal(${l.id})">✏️</button><button class="btn sm red" onclick="deleteLesson(${l.id})">🗑</button>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function fileDownloadUrl(kind, fid) {
+    const base = kind === 'task' ? `/api/task-files/${fid}` : `/api/material-files/${fid}`;
+    const tok = STATE.auth.dl_token ? `?dl=${encodeURIComponent(STATE.auth.dl_token)}` : '';
+    return base + tok;
+  }
+
+  function renderFilesHtml(kind, files) {
+    if (!files || !files.length) return '';
+    const inTg = Boolean(tg && tg.initData);
+    return `<div class="files-list">` + files.map(f => `
+      <div class="file-item">
+        <span class="file-name" title="${esc(f.file_name)}">📎 ${esc(f.file_name)} <span class="muted-text">(${formatBytes(f.file_size)})</span></span>
+        <div class="file-actions">
+          <a class="btn sm" href="${fileDownloadUrl(kind, f.id)}" download="${esc(f.file_name)}">⬇️</a>
+          ${inTg ? `<button class="btn sm primary" onclick="sendFileToMe('${kind}', ${f.id})">📩 В ЛС</button>` : ''}
+        </div>
+      </div>
+    `).join('') + `</div>`;
+  }
+
+  async function sendFileToMe(kind, fid) {
+    try {
+      await apiFetch(`/api/files/${kind}/${fid}/send-to-me`, { method: 'POST' });
+      showToast('Файл отправлен вам в личный чат с ботом!');
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  function formatSubmitLinkHtml(urlStr) {
+    const s = (urlStr || '').trim();
+    const httpMatch = s.match(/https?:\/\/\S+/);
+    if (httpMatch) {
+      const prefix = s.slice(0, httpMatch.index).trim();
+      return `${prefix ? esc(prefix) + ' ' : ''}<a href="${esc(httpMatch[0])}" target="_blank" style="color:var(--primary); font-weight:600;">🔗 Открыть ссылку</a>`;
+    }
+    const emailMatch = s.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (emailMatch) {
+      return `${esc(s)} (<a href="mailto:${esc(emailMatch[0])}" style="color:var(--primary);">Написать</a>)`;
+    }
+    return esc(s || 'Уточняется');
+  }
+
+  function renderTasks() {
+    const now = new Date();
+    const search = document.getElementById('taskSearch').value.toLowerCase();
+    const subjFilter = document.getElementById('taskSubjectFilter').value;
+    const isAdmin = STATE.auth.role === 'admin';
+
+    const filtered = STATE.tasks.filter(t => {
+      const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+      const isExpired = deadDt < now;
+      if (STATE.taskFilter === 'active' && isExpired) return false;
+      if (STATE.taskFilter === 'expired' && !isExpired) return false;
+      if (subjFilter && t.subject !== subjFilter) return false;
+      if (search && !(`${t.subject} ${t.description} ${t.submit_url}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    const el = document.getElementById('tasksContainer');
+    if (filtered.length === 0) {
+      el.innerHTML = '<div class="card"><p class="muted-text">Заданий по выбранным фильтрам нет.</p></div>';
+      return;
+    }
+
+    el.innerHTML = filtered.map(t => {
+      const [datePart, timePart] = t.deadline.split(' ');
+      const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+      const isExpired = deadDt < now;
+      const diffHours = Math.round((deadDt - now) / 3600000);
+      let timeBadge = '';
+      if (isExpired) {
+        timeBadge = `<span class="badge red">Просрочен</span>`;
+      } else if (diffHours <= 24) {
+        timeBadge = `<span class="badge amber">Осталось ${Math.max(1, diffHours)} ч</span>`;
+      } else {
+        timeBadge = `<span class="badge green">Через ${Math.ceil(diffHours / 24)} дн.</span>`;
+      }
+
+      const draftBadge = (isAdmin && t.is_published === false)
+        ? `<span class="badge amber">📝 Черновик (не в канале)</span>` : '';
+
+      return `
+        <div class="card">
+          <div class="card-header">
+            <span class="badge">${esc(t.subject)}</span>
+            <span style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+              ${draftBadge}
+              ${timeBadge}
+            </span>
+          </div>
+          <div style="font-size:13px; font-weight:700; margin-bottom:6px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">
+            ⏰ Сдать до: ${formatDateRu(datePart)} ${esc(timePart || '')}
+          </div>
+          <div class="pre-text" style="margin-bottom:8px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">${esc(t.description)}</div>
+          <div style="font-size:13px; color:var(--muted);">📥 Куда сдавать: ${formatSubmitLinkHtml(t.submit_url)}</div>
+          ${renderFilesHtml('task', t.files)}
+          ${isAdmin ? `
+            <div style="display:flex; gap:6px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); flex-wrap:wrap;">
+              <button class="btn sm" onclick="openTaskModal(${t.id})">✏️ Изменить / + Файлы</button>
+              <button class="btn sm red" onclick="deleteTask(${t.id})">🗑 Удалить</button>
+            </div>` : ''}
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderMaterials() {
+    const search = document.getElementById('matSearch').value.toLowerCase();
+    const subjFilter = document.getElementById('matSubjectFilter').value;
+    const isAdmin = STATE.auth.role === 'admin';
+
+    const filtered = STATE.materials.filter(m => {
+      if (subjFilter && m.subject !== subjFilter) return false;
+      if (search && !(`${m.subject} ${m.title} ${m.content_text} ${m.external_url}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    const el = document.getElementById('materialsContainer');
+    if (filtered.length === 0) {
+      el.innerHTML = '<div class="card"><p class="muted-text">В базе знаний пока пусто. Староста может добавить тексты, методички и ссылки!</p></div>';
+      return;
+    }
+
+    el.innerHTML = filtered.map(m => {
+      const preview = m.content_text.length > 220 ? m.content_text.slice(0, 220) + '…' : m.content_text;
+      return `
+        <div class="card">
+          <div class="card-header">
+            <span class="badge">${esc(m.subject)}</span>
+            <span class="muted-text">${esc(m.created_at)}</span>
+          </div>
+          <h3 style="font-size:16px; margin-bottom:6px;">${esc(m.title)}</h3>
+          ${preview ? `<div class="pre-text muted-text" style="margin-bottom:8px;">${esc(preview)}</div>` : ''}
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
+            ${m.content_text ? `<button class="btn sm" onclick="openReadMaterial(${m.id})">📖 Читать полностью</button>` : ''}
+            ${m.external_url ? `<a class="btn sm" href="${esc(m.external_url)}" target="_blank">🔗 Открыть ссылку</a>` : ''}
+          </div>
+          ${renderFilesHtml('material', m.files)}
+          ${isAdmin ? `
+            <div style="display:flex; gap:6px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
+              <button class="btn sm" onclick="openMaterialModal(${m.id})">✏️ Изменить / + Файлы</button>
+              <button class="btn sm red" onclick="deleteMaterial(${m.id})">🗑 Удалить</button>
+            </div>` : ''}
+        </div>
+      `;
+    }).join('');
+  }
+
+  function openReadMaterial(id) {
+    const m = STATE.materials.find(x => x.id === id);
+    if (!m) return;
+    STATE.currentReadText = m.content_text || '';
+    document.getElementById('readMatTitle').textContent = m.title;
+    document.getElementById('readMatSubj').textContent = m.subject;
+    document.getElementById('readMatBody').textContent = m.content_text || 'Текст отсутствует';
+    document.getElementById('readMatLinkWrap').innerHTML = m.external_url
+      ? `<a class="btn sm primary" href="${esc(m.external_url)}" target="_blank">🔗 Перейти по ссылке</a>` : '';
+    document.getElementById('readMatFiles').innerHTML = renderFilesHtml('material', m.files);
+    openModal('readMaterialModal');
+  }
+
+  function copyMaterialText() {
+    navigator.clipboard.writeText(STATE.currentReadText).then(() => showToast('Текст скопирован!'));
+  }
+
+  // --- MODALS & FILE PICKERS ---
+  function openModal(id) { document.getElementById(id).classList.add('open'); }
+  function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+  function setupDropzone(dropId, kind) {
+    const dz = document.getElementById(dropId);
+    dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); };
+    dz.ondragleave = () => dz.classList.remove('dragover');
+    dz.ondrop = e => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      onSelectFiles(kind, e.dataTransfer.files);
+    };
+  }
+  setupDropzone('taskDropzone', 'task');
+  setupDropzone('matDropzone', 'mat');
+
+  function onSelectFiles(kind, fileList) {
+    const arr = Array.from(fileList || []);
+    if (kind === 'task') {
+      STATE.pendingTaskFiles.push(...arr);
+      renderPendingFiles('task');
+    } else {
+      STATE.pendingMatFiles.push(...arr);
+      renderPendingFiles('mat');
+    }
+  }
+
+  function removePendingFile(kind, idx) {
+    if (kind === 'task') {
+      STATE.pendingTaskFiles.splice(idx, 1);
+      renderPendingFiles('task');
+    } else {
+      STATE.pendingMatFiles.splice(idx, 1);
+      renderPendingFiles('mat');
+    }
+  }
+
+  function renderPendingFiles(kind) {
+    const files = kind === 'task' ? STATE.pendingTaskFiles : STATE.pendingMatFiles;
+    const container = document.getElementById(kind === 'task' ? 'taskPendingFiles' : 'matPendingFiles');
+    container.innerHTML = files.map((f, idx) => `
+      <div class="file-item">
+        <span class="file-name">🆕 ${esc(f.name)} (${formatBytes(f.size)})</span>
+        <button class="btn sm red" onclick="removePendingFile('${kind}', ${idx})">✕</button>
+      </div>
+    `).join('');
+  }
+
+  // --- TASK CRUD ---
+  function openTaskModal(taskId = null) {
+    STATE.pendingTaskFiles = [];
+    document.getElementById('taskFilesInput').value = '';
+    renderPendingFiles('task');
+
+    const editIdEl = document.getElementById('taskEditId');
+    const existingWrap = document.getElementById('taskExistingFilesWrap');
+    const existingList = document.getElementById('taskExistingFilesList');
+
+    if (taskId) {
+      const t = STATE.tasks.find(x => x.id === taskId);
+      if (!t) return;
+      document.getElementById('taskModalTitle').textContent = 'Редактировать задание';
+      editIdEl.value = t.id;
+      const sel = document.getElementById('taskSubjectSelect');
+      if (Array.from(sel.options).some(o => o.value === t.subject)) {
+        sel.value = t.subject;
+        document.getElementById('taskSubjectCustom').classList.add('hidden');
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('taskSubjectCustom').classList.remove('hidden');
+        document.getElementById('taskSubjectCustom').value = t.subject;
+      }
+      document.getElementById('taskDesc').value = t.description;
+      document.getElementById('taskDeadline').value = t.deadline.replace(' ', 'T');
+      document.getElementById('taskSubmitUrl').value = t.submit_url;
+      document.getElementById('taskFilesLabel').textContent = 'Добавить ещё файлы к этому заданию';
+      if (t.is_published === false) {
+        document.getElementById('taskPublishLabel').textContent = 'Опубликовать черновик в Telegram-канал и обновить закреп';
+        document.getElementById('taskPublishCheck').checked = false;
+      } else {
+        document.getElementById('taskPublishLabel').textContent = 'Отправить уведомление об изменении в канал';
+        document.getElementById('taskPublishCheck').checked = true;
+      }
+
+      if (t.files && t.files.length) {
+        existingWrap.classList.remove('hidden');
+        existingList.innerHTML = t.files.map(f => `
+          <div class="file-item" id="tf-row-${f.id}">
+            <span class="file-name">📎 ${esc(f.file_name)} (${formatBytes(f.file_size)})</span>
+            <button class="btn sm red" onclick="deleteTaskFile(${t.id}, ${f.id})">✕ Удалить</button>
+          </div>
+        `).join('');
+      } else {
+        existingWrap.classList.add('hidden');
+      }
+    } else {
+      document.getElementById('taskModalTitle').textContent = 'Новое задание';
+      editIdEl.value = '';
+      document.getElementById('taskDesc').value = '';
+      document.getElementById('taskDeadline').value = `${STATE.today}T18:10`;
+      document.getElementById('taskSubmitUrl').value = '';
+      document.getElementById('taskFilesLabel').textContent = 'Прикрепить файлы (можно несколько штук сразу)';
+      document.getElementById('taskPublishLabel').textContent = 'Опубликовать в канал и закреп (снимите для тихого черновика)';
+      document.getElementById('taskPublishCheck').checked = true;
+      existingWrap.classList.add('hidden');
+    }
+    openModal('taskModal');
+  }
+
+  async function deleteTaskFile(taskId, fid) {
+    if (!confirm('Удалить этот файл из задания?')) return;
+    try {
+      await apiFetch(`/api/tasks/${taskId}/files/${fid}`, { method: 'DELETE' });
+      const row = document.getElementById(`tf-row-${fid}`);
+      if (row) row.remove();
+      showToast('Файл удалён');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function saveTask() {
+    const id = document.getElementById('taskEditId').value;
+    const subject = getSelectedSubject('taskSubjectSelect', 'taskSubjectCustom');
+    const description = document.getElementById('taskDesc').value.trim();
+    const deadline = document.getElementById('taskDeadline').value.trim();
+    const submit_url = document.getElementById('taskSubmitUrl').value.trim();
+    const publish = document.getElementById('taskPublishCheck').checked;
+
+    if (!subject || !description || !deadline) {
+      showToast('Заполните предмет, описание и дедлайн!', 3000);
+      return;
+    }
+
+    const btn = document.getElementById('taskSaveBtn');
+    btn.disabled = true;
+    try {
+      if (!id) {
+        const fd = new FormData();
+        fd.append('subject', subject);
+        fd.append('description', description);
+        fd.append('deadline', deadline);
+        fd.append('submit_url', submit_url);
+        fd.append('publish', publish ? 'true' : 'false');
+        STATE.pendingTaskFiles.forEach(f => fd.append('files', f));
+        await apiFetch('/api/tasks', { method: 'POST', body: fd });
+        showToast('Задание добавлено!');
+      } else {
+        await apiFetch(`/api/tasks/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject, description, deadline, submit_url, notify_channel: publish })
+        });
+        if (STATE.pendingTaskFiles.length > 0) {
+          const fd = new FormData();
+          fd.append('sync_channel', publish ? 'true' : 'false');
+          STATE.pendingTaskFiles.forEach(f => fd.append('files', f));
+          await apiFetch(`/api/tasks/${id}/files`, { method: 'POST', body: fd });
+        }
+        showToast('Задание обновлено!');
+      }
+      closeModal('taskModal');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteTask(id) {
+    if (!confirm('Удалить задание? Бот также сотрёт пост в канале и обновит закреп.')) return;
+    try {
+      await apiFetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      showToast('Задание удалено');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- LESSON CRUD ---
+  function openLessonModal(lid = null) {
+    document.getElementById('lessonEditId').value = lid || '';
+    if (lid) {
+      const l = STATE.schedule.find(x => x.id === lid);
+      if (!l) return;
+      document.getElementById('lessonModalTitle').textContent = 'Редактировать пару';
+      document.getElementById('lessonDate').value = l.lesson_date;
+      document.getElementById('lessonModule').value = String(l.module || 2);
+      document.getElementById('lessonStart').value = l.start_time;
+      document.getElementById('lessonEnd').value = l.end_time;
+      const sel = document.getElementById('lessonSubjectSelect');
+      if (Array.from(sel.options).some(o => o.value === l.subject)) {
+        sel.value = l.subject;
+        document.getElementById('lessonSubjectCustom').classList.add('hidden');
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('lessonSubjectCustom').classList.remove('hidden');
+        document.getElementById('lessonSubjectCustom').value = l.subject;
+      }
+      document.getElementById('lessonKind').value = l.kind;
+      document.getElementById('lessonTeacher').value = l.teacher || '';
+      document.getElementById('lessonUrl').value = l.url || '';
+    } else {
+      document.getElementById('lessonModalTitle').textContent = 'Добавить пару';
+      document.getElementById('lessonDate').value = STATE.today;
+      document.getElementById('lessonStart').value = '18:10';
+      document.getElementById('lessonEnd').value = '19:30';
+      document.getElementById('lessonTeacher').value = '';
+      document.getElementById('lessonUrl').value = 'https://telemost.360.yandex.ru/j/';
+    }
+    openModal('lessonModal');
+  }
+
+  async function saveLesson() {
+    const id = document.getElementById('lessonEditId').value;
+    const payload = {
+      lesson_date: document.getElementById('lessonDate').value,
+      module: Number(document.getElementById('lessonModule').value),
+      start_time: document.getElementById('lessonStart').value,
+      end_time: document.getElementById('lessonEnd').value,
+      subject: getSelectedSubject('lessonSubjectSelect', 'lessonSubjectCustom'),
+      kind: document.getElementById('lessonKind').value,
+      teacher: document.getElementById('lessonTeacher').value.trim(),
+      url: document.getElementById('lessonUrl').value.trim()
+    };
+    try {
+      if (id) {
+        await apiFetch(`/api/schedule/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showToast('Пара обновлена');
+      } else {
+        await apiFetch('/api/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showToast('Пара добавлена');
+      }
+      closeModal('lessonModal');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function deleteLesson(id) {
+    if (!confirm('Удалить пару из расписания?')) return;
+    try {
+      await apiFetch(`/api/schedule/${id}`, { method: 'DELETE' });
+      showToast('Пара удалена');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- MATERIAL CRUD ---
+  function openMaterialModal(mid = null) {
+    STATE.pendingMatFiles = [];
+    document.getElementById('matFilesInput').value = '';
+    renderPendingFiles('mat');
+
+    const editIdEl = document.getElementById('matEditId');
+    const existingWrap = document.getElementById('matExistingFilesWrap');
+    const existingList = document.getElementById('matExistingFilesList');
+
+    if (mid) {
+      const m = STATE.materials.find(x => x.id === mid);
+      if (!m) return;
+      document.getElementById('matModalTitle').textContent = 'Редактировать материал';
+      editIdEl.value = m.id;
+      const sel = document.getElementById('matSubjectSelect');
+      if (Array.from(sel.options).some(o => o.value === m.subject)) {
+        sel.value = m.subject;
+        document.getElementById('matSubjectCustom').classList.add('hidden');
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('matSubjectCustom').classList.remove('hidden');
+        document.getElementById('matSubjectCustom').value = m.subject;
+      }
+      document.getElementById('matTitle').value = m.title;
+      document.getElementById('matContent').value = m.content_text || '';
+      document.getElementById('matUrl').value = m.external_url || '';
+
+      if (m.files && m.files.length) {
+        existingWrap.classList.remove('hidden');
+        existingList.innerHTML = m.files.map(f => `
+          <div class="file-item" id="mf-row-${f.id}">
+            <span class="file-name">📎 ${esc(f.file_name)} (${formatBytes(f.file_size)})</span>
+            <button class="btn sm red" onclick="deleteMaterialFile(${m.id}, ${f.id})">✕ Удалить</button>
+          </div>
+        `).join('');
+      } else {
+        existingWrap.classList.add('hidden');
+      }
+    } else {
+      document.getElementById('matModalTitle').textContent = 'Добавить материал в базу';
+      editIdEl.value = '';
+      document.getElementById('matTitle').value = '';
+      document.getElementById('matContent').value = '';
+      document.getElementById('matUrl').value = '';
+      existingWrap.classList.add('hidden');
+    }
+    openModal('materialModal');
+  }
+
+  async function deleteMaterialFile(mid, fid) {
+    if (!confirm('Удалить файл?')) return;
+    try {
+      await apiFetch(`/api/materials/${mid}/files/${fid}`, { method: 'DELETE' });
+      const row = document.getElementById(`mf-row-${fid}`);
+      if (row) row.remove();
+      showToast('Файл удалён');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function saveMaterial() {
+    const id = document.getElementById('matEditId').value;
+    const subject = getSelectedSubject('matSubjectSelect', 'matSubjectCustom') || 'Общее / Организационное';
+    const title = document.getElementById('matTitle').value.trim();
+    const content_text = document.getElementById('matContent').value;
+    const external_url = document.getElementById('matUrl').value.trim();
+
+    if (!title) {
+      showToast('Введите заголовок!', 3000);
+      return;
+    }
+    const btn = document.getElementById('matSaveBtn');
+    btn.disabled = true;
+    try {
+      if (!id) {
+        const fd = new FormData();
+        fd.append('subject', subject);
+        fd.append('title', title);
+        fd.append('content_text', content_text);
+        fd.append('external_url', external_url);
+        STATE.pendingMatFiles.forEach(f => fd.append('files', f));
+        await apiFetch('/api/materials', { method: 'POST', body: fd });
+        showToast('Материал добавлен!');
+      } else {
+        await apiFetch(`/api/materials/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject, title, content_text, external_url })
+        });
+        if (STATE.pendingMatFiles.length > 0) {
+          const fd = new FormData();
+          STATE.pendingMatFiles.forEach(f => fd.append('files', f));
+          await apiFetch(`/api/materials/${id}/files`, { method: 'POST', body: fd });
+        }
+        showToast('Материал обновлён!');
+      }
+      closeModal('materialModal');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteMaterial(id) {
+    if (!confirm('Удалить этот материал и все прикреплённые файлы?')) return;
+    try {
+      await apiFetch(`/api/materials/${id}`, { method: 'DELETE' });
+      showToast('Удалено');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- ADMIN CSV & TOOLS ---
+  async function previewCsv() {
+    const file = document.getElementById('csvFileInput').files[0];
+    const csvText = document.getElementById('csvTextInput').value;
+    const defMod = document.getElementById('csvDefaultModule').value;
+
+    let res;
+    try {
+      if (file) {
+        const fd = new FormData();
+        fd.append('module', defMod);
+        fd.append('files', file);
+        res = await apiFetch('/api/schedule/preview-csv', { method: 'POST', body: fd });
+      } else {
+        res = await apiFetch('/api/schedule/preview-csv', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ module: defMod, csv_text: csvText })
+        });
+      }
+      STATE.csvPreviewLessons = res.lessons || [];
+      document.getElementById('csvPreviewBox').classList.remove('hidden');
+      document.getElementById('csvPreviewStats').textContent =
+        `Найдено пар: ${res.total} (новых: ${res.new_count}, совпадений: ${res.existing_count})`;
+      document.getElementById('csvPreviewList').innerHTML = STATE.csvPreviewLessons.slice(0, 60).map(l =>
+        `<div style="padding:3px 0; border-bottom:1px solid var(--border);">${esc(l.lesson_date)} ${esc(l.start_time)}-${esc(l.end_time)} • <b>${esc(l.subject)}</b> (${esc(l.kind)})</div>`
+      ).join('') + (STATE.csvPreviewLessons.length > 60 ? `<div class="muted-text">...и ещё ${STATE.csvPreviewLessons.length - 60} пар</div>` : '');
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function confirmCsvImport() {
+    if (!STATE.csvPreviewLessons.length) return;
+    const mode = document.getElementById('csvImportMode').value;
+    const target_module = Number(document.getElementById('csvDefaultModule').value);
+    try {
+      const res = await apiFetch('/api/schedule/import-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lessons: STATE.csvPreviewLessons, mode, target_module })
+      });
+      showToast(`Готово! Добавлено: ${res.inserted}, обновлено: ${res.updated}`, 4000);
+      document.getElementById('csvPreviewBox').classList.add('hidden');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function sendBroadcast() {
+    const text = document.getElementById('broadcastText').value.trim();
+    const pin = document.getElementById('broadcastPin').checked;
+    if (!text) return showToast('Введите текст объявления');
+    try {
+      await apiFetch('/api/admin/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, pin })
+      });
+      document.getElementById('broadcastText').value = '';
+      showToast('Объявление отправлено в канал!');
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function refreshPinnedPost() {
+    try {
+      await apiFetch('/api/admin/refresh-pin', { method: 'POST' });
+      showToast('Закреплённый пост обновлён!');
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function savePasswords() {
+    const student_password = document.getElementById('studentPasswordInput').value.trim();
+    const admin_password = document.getElementById('adminPasswordInput').value.trim();
+    try {
+      await apiFetch('/api/admin/passwords', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_password, admin_password })
+      });
+      document.getElementById('adminPasswordInput').value = '';
+      showToast('Пароли сохранены!');
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  initApp();
+</script>
+</body>
+</html>
