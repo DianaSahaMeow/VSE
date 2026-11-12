@@ -87,9 +87,27 @@ async def _get_passwords(conn) -> tuple[str, str]:
         "SELECT key, value FROM bot_metadata WHERE key IN ('crm_admin_password', 'crm_student_password')"
     )
     data = {r["key"]: r["value"] for r in rows}
-    admin_pw = data.get("crm_admin_password") or DEFAULT_ADMIN_PASSWORD
-    student_pw = data.get("crm_student_password") or DEFAULT_STUDENT_PASSWORD
+    admin_pw = data["crm_admin_password"] if data.get("crm_admin_password") else DEFAULT_ADMIN_PASSWORD
+    student_pw = data["crm_student_password"] if "crm_student_password" in data else DEFAULT_STUDENT_PASSWORD
     return admin_pw, student_pw
+
+
+async def _resolve_viewer_auth(request: web.Request, pool) -> dict:
+    """Возвращает авторизацию пользователя; если пароль группы пуст, пускает всех в режиме студента."""
+    auth = _resolve_auth(request)
+    if auth["authenticated"] or not pool:
+        return auth
+    async with pool.acquire() as conn:
+        _, student_pw = await _get_passwords(conn)
+    if not student_pw:
+        return {
+            "authenticated": True,
+            "role": "student",
+            "user_id": 0,
+            "user_name": "Гость (просмотр)",
+            "method": "public",
+        }
+    return auth
 
 
 def _resolve_auth(request: web.Request) -> dict:
@@ -267,7 +285,7 @@ def create_web_app(bot, get_db_pool) -> web.Application:
 
     # --- AUTH ---
     async def api_me(request: web.Request):
-        auth = _resolve_auth(request)
+        auth = await _resolve_viewer_auth(request, get_db_pool())
         dl_token = ""
         if auth["authenticated"]:
             dl_token = make_signed_token(
@@ -320,13 +338,13 @@ def create_web_app(bot, get_db_pool) -> web.Application:
 
     # --- BOOTSTRAP ---
     async def api_bootstrap(request: web.Request):
-        auth = _resolve_auth(request)
-        if not auth["authenticated"]:
-            return _json({"error": "Требуется авторизация"}, status=401)
-
         pool = get_db_pool()
         if not pool:
             return _json({"error": "База данных недоступна"}, status=503)
+
+        auth = await _resolve_viewer_auth(request, pool)
+        if not auth["authenticated"]:
+            return _json({"error": "Требуется авторизация"}, status=401)
 
         async with pool.acquire() as conn:
             subjects = await get_all_subjects(conn)
@@ -639,9 +657,14 @@ def create_web_app(bot, get_db_pool) -> web.Application:
         return _json({"ok": True})
 
     async def api_download_task_file(request: web.Request):
-        _require_auth(request, admin_only=False)
-        file_id = int(request.match_info["fid"])
         pool = get_db_pool()
+        auth = await _resolve_viewer_auth(request, pool)
+        if not auth["authenticated"]:
+            raise web.HTTPUnauthorized(
+                text=json.dumps({"error": "Требуется авторизация"}, ensure_ascii=False),
+                content_type="application/json",
+            )
+        file_id = int(request.match_info["fid"])
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, file_name, mime_type, file_data, telegram_file_id FROM task_files WHERE id = $1",
@@ -1001,9 +1024,14 @@ def create_web_app(bot, get_db_pool) -> web.Application:
         return _json({"ok": True})
 
     async def api_download_material_file(request: web.Request):
-        _require_auth(request, admin_only=False)
-        fid = int(request.match_info["fid"])
         pool = get_db_pool()
+        auth = await _resolve_viewer_auth(request, pool)
+        if not auth["authenticated"]:
+            raise web.HTTPUnauthorized(
+                text=json.dumps({"error": "Требуется авторизация"}, ensure_ascii=False),
+                content_type="application/json",
+            )
+        fid = int(request.match_info["fid"])
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, file_name, mime_type, file_data, telegram_file_id FROM material_files WHERE id = $1",
@@ -1046,7 +1074,7 @@ def create_web_app(bot, get_db_pool) -> web.Application:
         new_admin_pw = (body.get("admin_password") or "").strip()
 
         async with pool.acquire() as conn:
-            if new_student_pw:
+            if "student_password" in body:
                 await conn.execute(
                     """
                     INSERT INTO bot_metadata (key, value) VALUES ('crm_student_password', $1)
