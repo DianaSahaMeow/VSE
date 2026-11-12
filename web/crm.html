@@ -262,6 +262,130 @@
     .lesson-subj { font-weight: 600; font-size: 14px; }
     .lesson-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
+    /* Calendar */
+    .cal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .cal-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .cal-month-title {
+      font-size: 17px;
+      font-weight: 700;
+      min-width: 145px;
+      text-align: center;
+      text-transform: capitalize;
+    }
+    .cal-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .cal-weekday {
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      padding: 4px 0;
+    }
+    .cal-weekday.weekend { color: var(--red); opacity: 0.8; }
+    .cal-cell {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      min-height: 84px;
+      padding: 6px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: 0.14s ease;
+      overflow: hidden;
+    }
+    .cal-cell:hover { border-color: var(--primary); }
+    .cal-cell.is-other-month { opacity: 0.42; }
+    .cal-cell.is-today { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+    .cal-cell.is-selected {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--primary-soft);
+    }
+    .cal-cell-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+    }
+    .cal-day-num {
+      font-size: 13px;
+      font-weight: 700;
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+    }
+    .cal-cell.is-today .cal-day-num {
+      background: var(--primary);
+      color: #fff;
+    }
+    .cal-cell.is-weekend .cal-day-num { color: var(--red); }
+    .cal-cell.is-today.is-weekend .cal-day-num { color: #fff; }
+    .cal-chips {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .cal-chip {
+      font-size: 11px;
+      line-height: 1.25;
+      padding: 2px 5px;
+      border-radius: 5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+    .cal-chip.lesson { background: var(--primary-soft); color: var(--primary); }
+    .cal-chip.deadline { background: var(--red-soft); color: var(--red); }
+    .cal-chip.deadline-old { background: var(--amber-soft); color: var(--amber); opacity: 0.85; }
+    .cal-more { font-size: 10px; color: var(--muted); font-weight: 600; padding-left: 2px; }
+    .cal-dots { display: none; gap: 3px; flex-wrap: wrap; align-items: center; margin-top: auto; }
+    .cal-dot-pill {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 999px;
+      line-height: 1.3;
+    }
+    .cal-dot-pill.lesson { background: var(--primary-soft); color: var(--primary); }
+    .cal-dot-pill.deadline { background: var(--red-soft); color: var(--red); }
+    .cal-dot-pill.deadline-old { background: var(--amber-soft); color: var(--amber); }
+    .cal-legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    @media (max-width: 640px) {
+      .cal-grid { gap: 4px; }
+      .cal-cell { min-height: 54px; padding: 4px; border-radius: 8px; }
+      .cal-day-num { font-size: 12px; width: 21px; height: 21px; }
+      .cal-chips { display: none; }
+      .cal-dots { display: flex; }
+    }
+
     /* Modal */
     .modal-backdrop {
       position: fixed;
@@ -373,6 +497,7 @@
   <main class="container">
     <nav class="tabs">
       <button class="tab-btn active" data-tab="schedule" onclick="switchTab('schedule')">📅 Пары и Телемост</button>
+      <button class="tab-btn" data-tab="calendar" onclick="switchTab('calendar')">🗓 Календарь</button>
       <button class="tab-btn" data-tab="tasks" onclick="switchTab('tasks')">📌 Задания и Файлы</button>
       <button class="tab-btn" data-tab="materials" onclick="switchTab('materials')">📚 База знаний</button>
       <button id="adminTabBtn" class="tab-btn hidden" data-tab="admin" onclick="switchTab('admin')">⚙️ Админка</button>
@@ -418,6 +543,40 @@
         </div>
         <div id="scheduleListContainer"></div>
       </div>
+    </section>
+
+    <!-- TAB: CALENDAR -->
+    <section id="tab-calendar" class="hidden">
+      <div class="card">
+        <div class="cal-header">
+          <div class="cal-nav">
+            <button class="btn sm" onclick="changeCalMonth(-1)" title="Предыдущий месяц">◀</button>
+            <div id="calMonthTitle" class="cal-month-title">Месяц</div>
+            <button class="btn sm" onclick="changeCalMonth(1)" title="Следующий месяц">▶</button>
+            <button class="btn sm" onclick="jumpCalToday()">Сегодня</button>
+          </div>
+          <select id="calSubjectFilter" onchange="renderCalendar()" style="width:auto; min-width:190px; max-width:100%;">
+            <option value="">Все предметы</option>
+          </select>
+        </div>
+
+        <div class="pill-row">
+          <button class="pill active" onclick="setCalKindFilter('all', this)">Всё вместе</button>
+          <button class="pill" onclick="setCalKindFilter('lessons', this)">📚 Только пары</button>
+          <button class="pill" onclick="setCalKindFilter('tasks', this)">⏰ Только дедлайны</button>
+        </div>
+
+        <div id="calendarGrid" class="cal-grid"></div>
+
+        <div class="cal-legend">
+          <span>🟦 Синий — пары</span>
+          <span>🟥 Красный — активный дедлайн</span>
+          <span>🟨 Оранжевый — прошедший дедлайн</span>
+          <span>👆 Нажмите на любой день, чтобы увидеть детали</span>
+        </div>
+      </div>
+
+      <div id="calendarDayDetails" class="card"></div>
     </section>
 
     <!-- TAB 2: TASKS -->
@@ -723,6 +882,10 @@
     materials: [],
     schedFilter: 'upcoming',
     taskFilter: 'active',
+    calYear: null,
+    calMonth: null,
+    selectedCalDate: '',
+    calKindFilter: 'all',
     pendingTaskFiles: [],
     pendingMatFiles: [],
     csvPreviewLessons: [],
@@ -852,15 +1015,22 @@
     document.getElementById('dbUsageBar').style.width = `${Math.min(100, (usedMb / 500) * 100)}%`;
 
     document.getElementById('todayStr').textContent = formatDateRu(STATE.today);
+    if (!STATE.selectedCalDate && STATE.today) {
+      const [ty, tm] = STATE.today.split('-').map(Number);
+      STATE.calYear = ty;
+      STATE.calMonth = tm - 1;
+      STATE.selectedCalDate = STATE.today;
+    }
 
     populateSubjectSelects();
     renderSchedule();
+    renderCalendar();
     renderTasks();
     renderMaterials();
   }
 
   function populateSubjectSelects() {
-    const filterIds = ['schedSubjectFilter', 'taskSubjectFilter', 'matSubjectFilter'];
+    const filterIds = ['schedSubjectFilter', 'calSubjectFilter', 'taskSubjectFilter', 'matSubjectFilter'];
     filterIds.forEach(id => {
       const sel = document.getElementById(id);
       const prev = sel.value;
@@ -898,9 +1068,10 @@
 
   function switchTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
-    ['schedule', 'tasks', 'materials', 'admin'].forEach(t => {
+    ['schedule', 'calendar', 'tasks', 'materials', 'admin'].forEach(t => {
       document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tabName);
     });
+    if (tabName === 'calendar') renderCalendar();
   }
 
   function setSchedFilter(mode, btn) {
@@ -915,6 +1086,194 @@
     btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     renderTasks();
+  }
+
+  function setCalKindFilter(mode, btn) {
+    STATE.calKindFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderCalendar();
+  }
+
+  function changeCalMonth(delta) {
+    if (STATE.calYear === null || STATE.calMonth === null) return;
+    const d = new Date(STATE.calYear, STATE.calMonth + delta, 1);
+    STATE.calYear = d.getFullYear();
+    STATE.calMonth = d.getMonth();
+    renderCalendar();
+  }
+
+  function jumpCalToday() {
+    if (!STATE.today) return;
+    const [y, m] = STATE.today.split('-').map(Number);
+    STATE.calYear = y;
+    STATE.calMonth = m - 1;
+    STATE.selectedCalDate = STATE.today;
+    renderCalendar();
+  }
+
+  function selectCalDate(isoDate) {
+    STATE.selectedCalDate = isoDate;
+    const [y, m] = isoDate.split('-').map(Number);
+    if (y !== STATE.calYear || (m - 1) !== STATE.calMonth) {
+      STATE.calYear = y;
+      STATE.calMonth = m - 1;
+    }
+    renderCalendar();
+  }
+
+  function _toIsoDate(y, mZero, d) {
+    return `${y}-${String(mZero + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  function renderCalendar() {
+    const gridEl = document.getElementById('calendarGrid');
+    const titleEl = document.getElementById('calMonthTitle');
+    if (!gridEl || !titleEl) return;
+
+    if (STATE.calYear === null || STATE.calMonth === null) {
+      const ref = STATE.today ? new Date(STATE.today + 'T12:00:00') : new Date();
+      STATE.calYear = ref.getFullYear();
+      STATE.calMonth = ref.getMonth();
+      if (!STATE.selectedCalDate && STATE.today) STATE.selectedCalDate = STATE.today;
+    }
+
+    const monthNames = [
+      'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+      'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'
+    ];
+    titleEl.textContent = `${monthNames[STATE.calMonth]} ${STATE.calYear}`;
+
+    const subjFilter = document.getElementById('calSubjectFilter')?.value || '';
+    const showLessons = STATE.calKindFilter !== 'tasks';
+    const showTasks = STATE.calKindFilter !== 'lessons';
+    const now = new Date();
+
+    const lessonsByDate = {};
+    if (showLessons) {
+      STATE.schedule.forEach(l => {
+        if (subjFilter && l.subject !== subjFilter) return;
+        (lessonsByDate[l.lesson_date] = lessonsByDate[l.lesson_date] || []).push(l);
+      });
+    }
+
+    const tasksByDate = {};
+    if (showTasks) {
+      STATE.tasks.forEach(t => {
+        if (subjFilter && t.subject !== subjFilter) return;
+        const dtPart = (t.deadline || '').split(' ')[0];
+        if (!dtPart) return;
+        (tasksByDate[dtPart] = tasksByDate[dtPart] || []).push(t);
+      });
+    }
+
+    const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    let html = weekdays.map((w, idx) =>
+      `<div class="cal-weekday ${idx >= 5 ? 'weekend' : ''}">${w}</div>`
+    ).join('');
+
+    const firstDay = new Date(STATE.calYear, STATE.calMonth, 1);
+    const startOffset = (firstDay.getDay() + 6) % 7; // 0 = Пн ... 6 = Вс
+    const daysInMonth = new Date(STATE.calYear, STATE.calMonth + 1, 0).getDate();
+    const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
+
+    for (let i = 0; i < totalCells; i++) {
+      const cellDate = new Date(STATE.calYear, STATE.calMonth, 1 - startOffset + i);
+      const iso = _toIsoDate(cellDate.getFullYear(), cellDate.getMonth(), cellDate.getDate());
+      const inMonth = cellDate.getMonth() === STATE.calMonth;
+      const isWeekend = (i % 7) >= 5;
+      const isToday = iso === STATE.today;
+      const isSelected = iso === STATE.selectedCalDate;
+
+      const dayLessons = lessonsByDate[iso] || [];
+      const dayTasks = tasksByDate[iso] || [];
+
+      const classes = ['cal-cell'];
+      if (!inMonth) classes.push('is-other-month');
+      if (isWeekend) classes.push('is-weekend');
+      if (isToday) classes.push('is-today');
+      if (isSelected) classes.push('is-selected');
+
+      // Десктопные плашки (до 3 штук)
+      const chips = [];
+      dayLessons.forEach(l => {
+        chips.push(`<div class="cal-chip lesson" title="${esc(l.start_time)} ${esc(l.subject)}">${esc(l.start_time)} ${esc(l.subject)}</div>`);
+      });
+      dayTasks.forEach(t => {
+        const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+        const cls = deadDt < now ? 'deadline-old' : 'deadline';
+        const hm = (t.deadline.split(' ')[1] || '').trim();
+        chips.push(`<div class="cal-chip ${cls}" title="Дедлайн: ${esc(t.subject)} — ${esc(t.description)}">⏰ ${esc(hm)} ${esc(t.subject)}</div>`);
+      });
+      const shownChips = chips.slice(0, 3).join('');
+      const moreCount = chips.length > 3 ? `<div class="cal-more">+ ещё ${chips.length - 3}</div>` : '';
+
+      // Компактные счётчики для узких экранов
+      const dots = [];
+      if (dayLessons.length > 0) dots.push(`<span class="cal-dot-pill lesson">${dayLessons.length}п</span>`);
+      if (dayTasks.length > 0) {
+        const hasActiveTask = dayTasks.some(t => new Date(t.deadline.replace(' ', 'T') + ':00') >= now);
+        dots.push(`<span class="cal-dot-pill ${hasActiveTask ? 'deadline' : 'deadline-old'}">⏰${dayTasks.length}</span>`);
+      }
+
+      html += `
+        <div class="${classes.join(' ')}" onclick="selectCalDate('${iso}')">
+          <div class="cal-cell-top">
+            <span class="cal-day-num">${cellDate.getDate()}</span>
+          </div>
+          <div class="cal-chips">${shownChips}${moreCount}</div>
+          <div class="cal-dots">${dots.join('')}</div>
+        </div>
+      `;
+    }
+
+    gridEl.innerHTML = html;
+    renderCalendarDayDetails(subjFilter, showLessons, showTasks);
+  }
+
+  function renderCalendarDayDetails(subjFilter, showLessons, showTasks) {
+    const el = document.getElementById('calendarDayDetails');
+    if (!el) return;
+    const iso = STATE.selectedCalDate || STATE.today;
+    if (!iso) {
+      el.innerHTML = '<p class="muted-text">Выберите день в календаре.</p>';
+      return;
+    }
+
+    const isAdmin = STATE.auth.role === 'admin';
+    const now = new Date();
+    const lessons = showLessons
+      ? STATE.schedule.filter(l => l.lesson_date === iso && (!subjFilter || l.subject === subjFilter))
+      : [];
+    const tasks = showTasks
+      ? STATE.tasks.filter(t => (t.deadline || '').startsWith(iso) && (!subjFilter || t.subject === subjFilter))
+      : [];
+
+    let bodyHtml = '';
+    if (showLessons) {
+      bodyHtml += `<div style="margin-bottom:14px;">
+        <div style="font-size:14px; font-weight:700; margin-bottom:8px;">📚 Пары (${lessons.length})</div>
+        ${lessons.length ? lessons.map(l => renderLessonHtml(l, true)).join('') : '<p class="muted-text">В этот день пар нет.</p>'}
+      </div>`;
+    }
+    if (showTasks) {
+      bodyHtml += `<div>
+        <div style="font-size:14px; font-weight:700; margin-bottom:8px;">📌 Дедлайны (${tasks.length})</div>
+        ${tasks.length ? `<div class="grid">${tasks.map(t => renderTaskCardHtml(t, now)).join('')}</div>` : '<p class="muted-text">На этот день дедлайнов нет.</p>'}
+      </div>`;
+    }
+
+    el.innerHTML = `
+      <div class="section-title">
+        <span>📅 ${formatDateRu(iso)} ${iso === STATE.today ? '<span class="badge green">Сегодня</span>' : ''}</span>
+        ${isAdmin ? `
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="btn sm primary" onclick="openLessonModal(null, '${iso}')">➕ Пара</button>
+            <button class="btn sm" onclick="openTaskModal(null, '${iso}')">➕ Дедлайн</button>
+          </div>` : ''}
+      </div>
+      ${bodyHtml}
+    `;
   }
 
   function renderSchedule() {
@@ -1044,11 +1403,52 @@
     return esc(s || 'Уточняется');
   }
 
+  function renderTaskCardHtml(t, now = new Date()) {
+    const isAdmin = STATE.auth.role === 'admin';
+    const [datePart, timePart] = t.deadline.split(' ');
+    const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+    const isExpired = deadDt < now;
+    const diffHours = Math.round((deadDt - now) / 3600000);
+    let timeBadge = '';
+    if (isExpired) {
+      timeBadge = `<span class="badge red">Просрочен</span>`;
+    } else if (diffHours <= 24) {
+      timeBadge = `<span class="badge amber">Осталось ${Math.max(1, diffHours)} ч</span>`;
+    } else {
+      timeBadge = `<span class="badge green">Через ${Math.ceil(diffHours / 24)} дн.</span>`;
+    }
+
+    const draftBadge = (isAdmin && t.is_published === false)
+      ? `<span class="badge amber">📝 Черновик (не в канале)</span>` : '';
+
+    return `
+      <div class="card">
+        <div class="card-header">
+          <span class="badge">${esc(t.subject)}</span>
+          <span style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+            ${draftBadge}
+            ${timeBadge}
+          </span>
+        </div>
+        <div style="font-size:13px; font-weight:700; margin-bottom:6px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">
+          ⏰ Сдать до: ${formatDateRu(datePart)} ${esc(timePart || '')}
+        </div>
+        <div class="pre-text" style="margin-bottom:8px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">${esc(t.description)}</div>
+        <div style="font-size:13px; color:var(--muted);">📥 Куда сдавать: ${formatSubmitLinkHtml(t.submit_url)}</div>
+        ${renderFilesHtml('task', t.files)}
+        ${isAdmin ? `
+          <div style="display:flex; gap:6px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); flex-wrap:wrap;">
+            <button class="btn sm" onclick="openTaskModal(${t.id})">✏️ Изменить / + Файлы</button>
+            <button class="btn sm red" onclick="deleteTask(${t.id})">🗑 Удалить</button>
+          </div>` : ''}
+      </div>
+    `;
+  }
+
   function renderTasks() {
     const now = new Date();
     const search = document.getElementById('taskSearch').value.toLowerCase();
     const subjFilter = document.getElementById('taskSubjectFilter').value;
-    const isAdmin = STATE.auth.role === 'admin';
 
     const filtered = STATE.tasks.filter(t => {
       const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
@@ -1066,46 +1466,7 @@
       return;
     }
 
-    el.innerHTML = filtered.map(t => {
-      const [datePart, timePart] = t.deadline.split(' ');
-      const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
-      const isExpired = deadDt < now;
-      const diffHours = Math.round((deadDt - now) / 3600000);
-      let timeBadge = '';
-      if (isExpired) {
-        timeBadge = `<span class="badge red">Просрочен</span>`;
-      } else if (diffHours <= 24) {
-        timeBadge = `<span class="badge amber">Осталось ${Math.max(1, diffHours)} ч</span>`;
-      } else {
-        timeBadge = `<span class="badge green">Через ${Math.ceil(diffHours / 24)} дн.</span>`;
-      }
-
-      const draftBadge = (isAdmin && t.is_published === false)
-        ? `<span class="badge amber">📝 Черновик (не в канале)</span>` : '';
-
-      return `
-        <div class="card">
-          <div class="card-header">
-            <span class="badge">${esc(t.subject)}</span>
-            <span style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
-              ${draftBadge}
-              ${timeBadge}
-            </span>
-          </div>
-          <div style="font-size:13px; font-weight:700; margin-bottom:6px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">
-            ⏰ Сдать до: ${formatDateRu(datePart)} ${esc(timePart || '')}
-          </div>
-          <div class="pre-text" style="margin-bottom:8px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">${esc(t.description)}</div>
-          <div style="font-size:13px; color:var(--muted);">📥 Куда сдавать: ${formatSubmitLinkHtml(t.submit_url)}</div>
-          ${renderFilesHtml('task', t.files)}
-          ${isAdmin ? `
-            <div style="display:flex; gap:6px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); flex-wrap:wrap;">
-              <button class="btn sm" onclick="openTaskModal(${t.id})">✏️ Изменить / + Файлы</button>
-              <button class="btn sm red" onclick="deleteTask(${t.id})">🗑 Удалить</button>
-            </div>` : ''}
-        </div>
-      `;
-    }).join('');
+    el.innerHTML = filtered.map(t => renderTaskCardHtml(t, now)).join('');
   }
 
   function renderMaterials() {
@@ -1217,7 +1578,7 @@
   }
 
   // --- TASK CRUD ---
-  function openTaskModal(taskId = null) {
+  function openTaskModal(taskId = null, presetDate = null) {
     STATE.pendingTaskFiles = [];
     document.getElementById('taskFilesInput').value = '';
     renderPendingFiles('task');
@@ -1267,7 +1628,7 @@
       document.getElementById('taskModalTitle').textContent = 'Новое задание';
       editIdEl.value = '';
       document.getElementById('taskDesc').value = '';
-      document.getElementById('taskDeadline').value = `${STATE.today}T18:10`;
+      document.getElementById('taskDeadline').value = `${presetDate || STATE.today}T18:10`;
       document.getElementById('taskSubmitUrl').value = '';
       document.getElementById('taskFilesLabel').textContent = 'Прикрепить файлы (можно несколько штук сразу)';
       document.getElementById('taskPublishLabel').textContent = 'Опубликовать в канал и закреп (снимите для тихого черновика)';
@@ -1351,7 +1712,7 @@
   }
 
   // --- LESSON CRUD ---
-  function openLessonModal(lid = null) {
+  function openLessonModal(lid = null, presetDate = null) {
     document.getElementById('lessonEditId').value = lid || '';
     if (lid) {
       const l = STATE.schedule.find(x => x.id === lid);
@@ -1375,7 +1736,7 @@
       document.getElementById('lessonUrl').value = l.url || '';
     } else {
       document.getElementById('lessonModalTitle').textContent = 'Добавить пару';
-      document.getElementById('lessonDate').value = STATE.today;
+      document.getElementById('lessonDate').value = presetDate || STATE.today;
       document.getElementById('lessonStart').value = '18:10';
       document.getElementById('lessonEnd').value = '19:30';
       document.getElementById('lessonTeacher').value = '';
