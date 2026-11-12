@@ -467,14 +467,15 @@
   <div class="card login-card">
     <h2 style="margin-bottom: 6px;">📚 Учебная CRM • 216</h2>
     <p class="muted-text" style="margin-bottom: 16px;">
-      Введите пароль старосты или пароль группы.<br/>
-      В Telegram Mini App вход выполняется автоматически.
+      Введите пароль старосты для управления (или пароль группы, если он задан).<br/>
+      Для старосты в Telegram Mini App вход выполняется автоматически по ID.
     </p>
     <div class="form-group">
       <label for="loginPass">Пароль доступа</label>
       <input type="password" id="loginPass" placeholder="Введите пароль..." onkeydown="if(event.key==='Enter') doLogin()" />
     </div>
     <button class="btn primary" style="width:100%;" onclick="doLogin()">Войти</button>
+    <button id="backToAppBtn" class="btn hidden" style="width:100%; margin-top:8px;" onclick="closeLoginView()">← Вернуться к просмотру</button>
     <p id="loginErr" style="color: var(--red); font-size: 13px; margin-top: 8px;"></p>
   </div>
 </div>
@@ -489,6 +490,7 @@
       <div class="topbar-actions">
         <button class="btn sm" onclick="toggleTheme()" title="Сменить тему">🌓</button>
         <button class="btn sm" onclick="loadBootstrap()" title="Обновить данные">🔄</button>
+        <button id="adminLoginBtn" class="btn sm primary hidden" onclick="openAdminLogin()">🔑 Староста</button>
         <button id="logoutBtn" class="btn sm hidden" onclick="doLogout()">Выйти</button>
       </div>
     </div>
@@ -668,12 +670,12 @@
           <div class="section-title"><span>🔐 Доступ в браузере</span></div>
           <p class="muted-text" style="margin-bottom: 8px;">Ссылка на CRM: <code id="crmUrlCode">/crm</code></p>
           <div class="form-group">
-            <label>Пароль для группы (только чтение и скачивание)</label>
-            <input type="text" id="studentPasswordInput" />
+            <label>Пароль для группы (пусто = открытый вход для всех на просмотр)</label>
+            <input type="text" id="studentPasswordInput" placeholder="Пусто = свободный вход для всех" />
           </div>
           <div class="form-group">
             <label>Новый пароль старосты (оставьте пустым, чтобы не менять)</label>
-            <input type="password" id="adminPasswordInput" placeholder="Новый пароль администратора..." />
+            <input type="password" id="adminPasswordInput" placeholder="По умолчанию: 340568" />
           </div>
           <button class="btn" onclick="savePasswords()">💾 Сохранить пароли</button>
         </div>
@@ -962,6 +964,22 @@
     }
   }
 
+  function openAdminLogin() {
+    document.getElementById('loginErr').textContent = '';
+    document.getElementById('loginPass').value = '';
+    document.getElementById('backToAppBtn').classList.remove('hidden');
+    document.getElementById('loginView').classList.remove('hidden');
+    document.getElementById('appView').classList.add('hidden');
+    setTimeout(() => document.getElementById('loginPass').focus(), 50);
+  }
+
+  function closeLoginView() {
+    document.getElementById('loginErr').textContent = '';
+    document.getElementById('loginPass').value = '';
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+  }
+
   async function doLogin() {
     const pw = document.getElementById('loginPass').value;
     const errEl = document.getElementById('loginErr');
@@ -997,14 +1015,15 @@
 
     const isAdmin = STATE.auth.role === 'admin';
     const badge = document.getElementById('roleBadge');
-    badge.textContent = isAdmin ? '👑 Староста (Админ)' : '🎓 Студент (Просмотр)';
+    badge.textContent = isAdmin ? '👑 Староста (Админ)' : '🎓 Просмотр';
     badge.className = isAdmin ? 'badge green' : 'badge';
 
     document.querySelectorAll('.admin-only').forEach(el => {
       el.classList.toggle('hidden', !isAdmin);
     });
     document.getElementById('adminTabBtn').classList.toggle('hidden', !isAdmin);
-    document.getElementById('logoutBtn').classList.toggle('hidden', STATE.auth.method === 'telegram');
+    document.getElementById('adminLoginBtn').classList.toggle('hidden', isAdmin);
+    document.getElementById('logoutBtn').classList.toggle('hidden', STATE.auth.method === 'telegram' || STATE.auth.method === 'public');
 
     if (isAdmin && data.admin_info) {
       document.getElementById('studentPasswordInput').value = data.admin_info.student_password || '';
