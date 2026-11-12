@@ -122,6 +122,41 @@ async def migrate_schema(conn):
         """
     )
 
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS announcements (
+            id SERIAL PRIMARY KEY,
+            title TEXT DEFAULT '',
+            body TEXT NOT NULL,
+            is_pinned BOOLEAN DEFAULT FALSE,
+            channel_message_id BIGINT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    await conn.execute("ALTER TABLE announcements ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''")
+    await conn.execute("ALTER TABLE announcements ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE")
+    await conn.execute("ALTER TABLE announcements ADD COLUMN IF NOT EXISTS channel_message_id BIGINT")
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tables_links (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            subject TEXT DEFAULT '',
+            category TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    await conn.execute("ALTER TABLE tables_links ADD COLUMN IF NOT EXISTS subject TEXT DEFAULT ''")
+    await conn.execute("ALTER TABLE tables_links ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''")
+    await conn.execute("ALTER TABLE tables_links ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''")
+    await conn.execute("ALTER TABLE tables_links ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0")
+
     # Миграция старых одиночных file_id из таблицы tasks в task_files (если ещё не перенесены)
     legacy_rows = await conn.fetch(
         """
@@ -146,7 +181,7 @@ async def migrate_schema(conn):
 async def get_all_subjects(conn) -> list[str]:
     """Возвращает объединённый список всех актуальных предметов."""
     subjects = list(DEFAULT_SUBJECTS)
-    for table in ("tasks", "schedule", "materials"):
+    for table in ("tasks", "schedule", "materials", "tables_links"):
         rows = await conn.fetch(f"SELECT DISTINCT subject FROM {table} WHERE subject IS NOT NULL AND subject != ''")
         for r in rows:
             s = r["subject"].strip()
