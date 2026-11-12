@@ -259,14 +259,28 @@ async def process_notice_pin(message: Message, state: FSMContext):
     
     try:
         msg = await bot.send_message(chat_id=CHANNEL_ID, text=full_text, parse_mode=ParseMode.HTML)
-        if "Да, закрепить" in message.text:
+        is_pinned = "Да, закрепить" in message.text
+        if is_pinned:
             await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=msg.message_id)
-            await message.answer("📢 Объявление опубликовано и закреплено!", reply_markup=ReplyKeyboardRemove())
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO announcements (title, body, is_pinned, channel_message_id)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    "Важное объявление",
+                    user_data['text'].strip(),
+                    is_pinned,
+                    msg.message_id,
+                )
+        if is_pinned:
+            await message.answer("📢 Объявление опубликовано, закреплено и добавлено в CRM!", reply_markup=admin_main_keyboard)
         else:
-            await message.answer("📢 Объявление успешно опубликовано!", reply_markup=ReplyKeyboardRemove())
+            await message.answer("📢 Объявление опубликовано и добавлено в CRM!", reply_markup=admin_main_keyboard)
     except Exception as e:
         logging.error(f"Ошибка отправки объявления: {e}")
-        await message.answer("❌ Произошла ошибка при отправке сообщения в канал.", reply_markup=ReplyKeyboardRemove())
+        await message.answer("❌ Произошла ошибка при отправке сообщения в канал.", reply_markup=admin_main_keyboard)
         
     await state.clear()
 
@@ -1002,10 +1016,8 @@ async def cmd_crm(message: Message, state: FSMContext):
 @router.message(Command("crm"))
 async def cmd_crm_non_admin(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "📌 Актуальные дедлайны и ссылки на пары публикуются в канале группы.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    text, kb = _build_crm_message(is_admin=False)
+    await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 @router.message(Command("start"), F.from_user.id == ADMIN_ID)
@@ -1015,20 +1027,23 @@ async def cmd_start_admin(message: Message, state: FSMContext):
     _, crm_kb = _build_crm_message(is_admin=True)
     await message.answer(
         "👋 Привет, староста! Рад приветствовать тебя в панели управления группой.\n\n"
-        "✨ Меню быстрых кнопок внизу экрана. Для управления файлами, расписанием и базой знаний открой /crm.",
+        "✨ Меню быстрых кнопок внизу экрана. Для управления файлами, расписанием, объявлениями и таблицами открой /crm.",
         reply_markup=admin_main_keyboard,
     )
     if crm_kb:
-        await message.answer("📱 Быстрый вход в CRM-панель (доступно только тебе):", reply_markup=crm_kb)
+        await message.answer("📱 Быстрый вход в CRM-панель (вход старосты выполняется автоматически):", reply_markup=crm_kb)
 
 
 @router.message(Command("start"))
 async def cmd_start_user(message: Message, state: FSMContext):
     await state.clear()
+    _, crm_kb = _build_crm_message(is_admin=False)
     await message.answer(
-        "👋 Привет! Я бот группы.\n\n"
-        "📌 Актуальные дедлайны и ссылки на пары публикуются в канале группы.",
-        reply_markup=ReplyKeyboardRemove(),
+        "👋 Привет! Чем могу помочь?\n\n"
+        "Открой учебную CRM через кнопку ниже (или кнопку <b>CRM</b> слева от поля ввода) — "
+        "там собраны актуальное расписание, ссылки на Телемост и таблицы, важные объявления и задания.",
+        reply_markup=crm_kb if crm_kb else ReplyKeyboardRemove(),
+        parse_mode=ParseMode.HTML,
     )
 
 # --- ДОБАВЛЕНИЕ ДЕДЛАЙНА ---
@@ -1265,16 +1280,16 @@ async def main():
 
     logging.info(f"⏰ Планировщик запущен. Внутреннее время: {now_msk()}")
 
-    # 4. Установка кнопки Menu App (Mini App) ТОЛЬКО для старосты (ADMIN_ID)
+    # 4. Установка кнопки Menu App (Mini App) для всех участников группы (внутри CRM права определяются по ID)
     crm_base = get_crm_base_url()
     try:
-        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
         if crm_base.startswith("https://"):
-            await bot.set_chat_menu_button(
-                chat_id=ADMIN_ID,
-                menu_button=MenuButtonWebApp(text="CRM", web_app=WebAppInfo(url=f"{crm_base}/crm")),
-            )
-            logging.info(f"📱 MenuButtonWebApp настроен только для ADMIN_ID={ADMIN_ID} на {crm_base}/crm")
+            menu_btn = MenuButtonWebApp(text="CRM", web_app=WebAppInfo(url=f"{crm_base}/crm"))
+            await bot.set_chat_menu_button(menu_button=menu_btn)
+            await bot.set_chat_menu_button(chat_id=ADMIN_ID, menu_button=menu_btn)
+            logging.info(f"📱 MenuButtonWebApp 'CRM' настроен глобально на {crm_base}/crm")
+        else:
+            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
     except Exception as e:
         logging.warning(f"Не удалось настроить MenuButton: {e}")
 
