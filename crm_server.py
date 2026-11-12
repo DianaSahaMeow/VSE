@@ -450,6 +450,46 @@ def create_web_app(bot, get_db_pool) -> web.Application:
                 for m in mat_rows
             ]
 
+            ann_rows = await conn.fetch(
+                """
+                SELECT id, title, body, is_pinned, channel_message_id, created_at
+                FROM announcements
+                ORDER BY is_pinned DESC, created_at DESC, id DESC
+                """
+            )
+            announcements_list = [
+                {
+                    "id": a["id"],
+                    "title": a["title"] or "",
+                    "body": a["body"] or "",
+                    "is_pinned": bool(a["is_pinned"]),
+                    "channel_message_id": a["channel_message_id"],
+                    "created_at": a["created_at"].strftime("%d.%m.%Y %H:%M") if a["created_at"] else "",
+                }
+                for a in ann_rows
+            ]
+
+            table_rows = await conn.fetch(
+                """
+                SELECT id, title, url, subject, category, description, sort_order, created_at
+                FROM tables_links
+                ORDER BY sort_order ASC, id DESC
+                """
+            )
+            tables_list = [
+                {
+                    "id": tb["id"],
+                    "title": tb["title"] or "",
+                    "url": tb["url"] or "",
+                    "subject": tb["subject"] or "",
+                    "category": tb["category"] or "",
+                    "description": tb["description"] or "",
+                    "sort_order": tb["sort_order"] or 0,
+                    "created_at": tb["created_at"].strftime("%d.%m.%Y %H:%M") if tb["created_at"] else "",
+                }
+                for tb in table_rows
+            ]
+
             db_bytes = await conn.fetchval("SELECT pg_database_size(current_database())")
             admin_info = {}
             if auth["role"] == "admin":
@@ -471,6 +511,8 @@ def create_web_app(bot, get_db_pool) -> web.Application:
                 "schedule": schedule_list,
                 "tasks": tasks_list,
                 "materials": materials_list,
+                "announcements": announcements_list,
+                "tables_links": tables_list,
                 "db_size_mb": round((db_bytes or 0) / (1024 * 1024), 2),
                 "admin_info": admin_info,
             }
@@ -1041,6 +1083,165 @@ def create_web_app(bot, get_db_pool) -> web.Application:
             return _json({"error": "Файл не найден"}, status=404)
         return await _serve_file_bytes(bot, row)
 
+    # --- ANNOUNCEMENTS ---
+    def _normalize_url(raw_url: str) -> str:
+        val = (raw_url or "").strip()
+        if val and not val.startswith(("http://", "https://")):
+            return f"https://{val}"
+        return val
+
+    async def api_create_announcement(request: web.Request):
+        _require_auth(request, admin_only=True)
+        pool = get_db_pool()
+        body = await request.json()
+        title = (body.get("title") or "").strip() or "Важное объявление"
+        text_body = (body.get("body") or body.get("text") or "").strip()
+        is_pinned = bool(body.get("is_pinned", False))
+        send_to_channel = bool(body.get("send_to_channel", False))
+        pin_in_channel = bool(body.get("pin_in_channel", False))
+        if not text_body:
+            return _json({"error": "Введите текст объявления"}, status=400)
+
+        channel_msg_id = None
+        if send_to_channel:
+            header = clean_html(title) if title else "Важное объявление"
+            full_text = (
+                f"🚨 <b>{header}</b> #инфо\n\n"
+                f"{clean_html(text_body)}\n\n"
+                f"Просьба ознакомиться!"
+            )
+            msg = await bot.send_message(chat_id=CHANNEL_ID, text=full_text, parse_mode=ParseMode.HTML)
+            channel_msg_id = msg.message_id
+            if pin_in_channel:
+                await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=msg.message_id)
+
+        async with pool.acquire() as conn:
+            ann_id = await conn.fetchval(
+                """
+                INSERT INTO announcements (title, body, is_pinned, channel_message_id)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                title,
+                text_body,
+                is_pinned,
+                channel_msg_id,
+            )
+        return _json({"ok": True, "id": ann_id, "channel_message_id": channel_msg_id})
+
+    async def api_update_announcement(request: web.Request):
+        _require_auth(request, admin_only=True)
+        pool = get_db_pool()
+        ann_id = int(request.match_info["id"])
+        body = await request.json()
+        title = (body.get("title") or "").strip() or "Важное объявление"
+        text_body = (body.get("body") or body.get("text") or "").strip()
+        is_pinned = bool(body.get("is_pinned", False))
+        if not text_body:
+            return _json({"error": "Введите текст объявления"}, status=400)
+        async with pool.acquire() as conn:
+            res = await conn.execute(
+                """
+                UPDATE announcements
+                SET title = $1, body = $2, is_pinned = $3
+                WHERE id = $4
+                """,
+                title,
+                text_body,
+                is_pinned,
+                ann_id,
+            )
+        if res == "UPDATE 0":
+            return _json({"error": "Объявление не найдено"}, status=404)
+        return _json({"ok": True})
+
+    async def api_delete_announcement(request: web.Request):
+        _require_auth(request, admin_only=True)
+        pool = get_db_pool()
+        ann_id = int(request.match_info["id"])
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM announcements WHERE id = $1", ann_id)
+        return _json({"ok": True})
+
+    # --- TABLES LINKS ---
+    async def api_create_table_link(request: web.Request):
+        _require_auth(request, admin_only=True)
+        pool = get_db_pool()
+        body = await request.json()
+        title = (body.get("title") or "").strip()
+        url = _normalize_url(body.get("url") or "")
+        subject = (body.get("subject") or "").strip()
+        category = (body.get("category") or "").strip()
+        description = (body.get("description") or "").strip()
+        try:
+            sort_order = int(body.get("sort_order") or 0)
+        except (ValueError, TypeError):
+            sort_order = 0
+
+        if not title or not url:
+            return _json({"error": "Укажите название таблицы и ссылку"}, status=400)
+
+        async with pool.acquire() as conn:
+            tid = await conn.fetchval(
+                """
+                INSERT INTO tables_links (title, url, subject, category, description, sort_order)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
+                """,
+                title,
+                url,
+                subject,
+                category,
+                description,
+                sort_order,
+            )
+        return _json({"ok": True, "id": tid})
+
+    async def api_update_table_link(request: web.Request):
+        _require_auth(request, admin_only=True)
+        pool = get_db_pool()
+        tid = int(request.match_info["id"])
+        body = await request.json()
+        title = (body.get("title") or "").strip()
+        url = _normalize_url(body.get("url") or "")
+        subject = (body.get("subject") or "").strip()
+        category = (body.get("category") or "").strip()
+        description = (body.get("description") or "").strip()
+        try:
+            sort_order = int(body.get("sort_order") or 0)
+        except (ValueError, TypeError):
+            sort_order = 0
+
+        if not title or not url:
+            return _json({"error": "Укажите название таблицы и ссылку"}, status=400)
+
+        async with pool.acquire() as conn:
+            res = await conn.execute(
+                """
+                UPDATE tables_links
+                SET title = $1, url = $2, subject = $3, category = $4, description = $5, sort_order = $6
+                WHERE id = $7
+                """,
+                title,
+                url,
+                subject,
+                category,
+                description,
+                sort_order,
+                tid,
+            )
+        if res == "UPDATE 0":
+            return _json({"error": "Таблица не найдена"}, status=404)
+        return _json({"ok": True})
+
+    async def api_delete_table_link(request: web.Request):
+        _require_auth(request, admin_only=True)
+        pool = get_db_pool()
+        tid = int(request.match_info["id"])
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM tables_links WHERE id = $1", tid)
+        return _json({"ok": True})
+
     # --- ADMIN TOOLS ---
     async def api_admin_refresh_pin(request: web.Request):
         _require_auth(request, admin_only=True)
@@ -1050,21 +1251,36 @@ def create_web_app(bot, get_db_pool) -> web.Application:
 
     async def api_admin_broadcast(request: web.Request):
         _require_auth(request, admin_only=True)
+        pool = get_db_pool()
         body = await request.json()
+        title = (body.get("title") or "").strip() or "Важное объявление"
         raw_text = (body.get("text") or "").strip()
         pin = bool(body.get("pin", False))
         if not raw_text:
             return _json({"error": "Введите текст объявления"}, status=400)
 
         full_text = (
-            f"🚨 <b>Важное объявление</b> #инфо\n\n"
+            f"🚨 <b>{clean_html(title)}</b> #инфо\n\n"
             f"{clean_html(raw_text)}\n\n"
             f"Просьба ознакомиться!"
         )
         msg = await bot.send_message(chat_id=CHANNEL_ID, text=full_text, parse_mode=ParseMode.HTML)
         if pin:
             await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=msg.message_id)
-        return _json({"ok": True, "message_id": msg.message_id})
+
+        async with pool.acquire() as conn:
+            ann_id = await conn.fetchval(
+                """
+                INSERT INTO announcements (title, body, is_pinned, channel_message_id)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                title,
+                raw_text,
+                pin,
+                msg.message_id,
+            )
+        return _json({"ok": True, "message_id": msg.message_id, "announcement_id": ann_id})
 
     async def api_admin_passwords(request: web.Request):
         _require_auth(request, admin_only=True)
@@ -1123,6 +1339,14 @@ def create_web_app(bot, get_db_pool) -> web.Application:
     app.router.add_delete("/api/materials/{id}/files/{fid}", api_delete_material_file)
     app.router.add_delete("/api/materials/{id}", api_delete_material)
     app.router.add_get("/api/material-files/{fid}", api_download_material_file)
+
+    app.router.add_post("/api/announcements", api_create_announcement)
+    app.router.add_put("/api/announcements/{id}", api_update_announcement)
+    app.router.add_delete("/api/announcements/{id}", api_delete_announcement)
+
+    app.router.add_post("/api/tables", api_create_table_link)
+    app.router.add_put("/api/tables/{id}", api_update_table_link)
+    app.router.add_delete("/api/tables/{id}", api_delete_table_link)
 
     app.router.add_post("/api/admin/refresh-pin", api_admin_refresh_pin)
     app.router.add_post("/api/admin/broadcast", api_admin_broadcast)
