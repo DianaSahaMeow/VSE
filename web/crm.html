@@ -501,12 +501,16 @@
       <button class="tab-btn active" data-tab="schedule" onclick="switchTab('schedule')">📅 Пары и Телемост</button>
       <button class="tab-btn" data-tab="calendar" onclick="switchTab('calendar')">🗓 Календарь</button>
       <button class="tab-btn" data-tab="tasks" onclick="switchTab('tasks')">📌 Задания и Файлы</button>
+      <button class="tab-btn" data-tab="tables" onclick="switchTab('tables')">📊 Таблицы</button>
+      <button class="tab-btn" data-tab="announcements" onclick="switchTab('announcements')">📢 Объявления</button>
       <button class="tab-btn" data-tab="materials" onclick="switchTab('materials')">📚 База знаний</button>
       <button id="adminTabBtn" class="tab-btn hidden" data-tab="admin" onclick="switchTab('admin')">⚙️ Админка</button>
     </nav>
 
     <!-- TAB 1: SCHEDULE -->
     <section id="tab-schedule">
+      <div id="pinnedAnnouncementsBanner"></div>
+
       <div class="card">
         <div class="section-title">
           <span>🔥 Пары сегодня (<span id="todayStr"></span>)</span>
@@ -520,6 +524,14 @@
           <span>🎥 Быстрые ссылки на Телемост</span>
         </div>
         <div id="telemostLinksContainer" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+      </div>
+
+      <div id="quickTablesCard" class="card hidden">
+        <div class="section-title">
+          <span>📊 Актуальные таблицы группы</span>
+          <button class="btn sm" onclick="switchTab('tables')">Все таблицы →</button>
+        </div>
+        <div id="quickTablesContainer" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
       </div>
 
       <div class="card">
@@ -598,6 +610,31 @@
       <div id="tasksContainer" class="grid"></div>
     </section>
 
+    <!-- TAB: TABLES -->
+    <section id="tab-tables" class="hidden">
+      <div class="toolbar">
+        <input type="text" id="tableSearch" placeholder="Поиск по названию, предмету или категории..." oninput="renderTables()" />
+        <select id="tableSubjectFilter" onchange="renderTables()">
+          <option value="">Все предметы</option>
+        </select>
+        <button class="btn primary admin-only hidden" onclick="openTableModal()">➕ Добавить таблицу</button>
+      </div>
+      <div id="tablesContainer" class="grid"></div>
+    </section>
+
+    <!-- TAB: ANNOUNCEMENTS -->
+    <section id="tab-announcements" class="hidden">
+      <div class="toolbar">
+        <input type="text" id="annSearch" placeholder="Поиск по объявлениям..." oninput="renderAnnouncements()" />
+        <button class="btn primary admin-only hidden" onclick="openAnnouncementModal()">➕ Новое объявление</button>
+      </div>
+      <div class="pill-row">
+        <button class="pill active" onclick="setAnnFilter('all', this)">Все</button>
+        <button class="pill" onclick="setAnnFilter('pinned', this)">📌 Закреплённые</button>
+      </div>
+      <div id="announcementsContainer" class="grid"></div>
+    </section>
+
     <!-- TAB 3: MATERIALS -->
     <section id="tab-materials" class="hidden">
       <div class="toolbar">
@@ -649,14 +686,18 @@
         </div>
 
         <div class="card">
-          <div class="section-title"><span>📢 Важное объявление в канал</span></div>
+          <div class="section-title"><span>📢 Важное объявление (в канал и в CRM)</span></div>
+          <div class="form-group">
+            <label>Заголовок (необязательно)</label>
+            <input type="text" id="broadcastTitle" placeholder="Например: Важное объявление" />
+          </div>
           <div class="form-group">
             <textarea id="broadcastText" placeholder="Введите текст объявления для группы..."></textarea>
           </div>
           <label class="checkbox-row" style="margin-bottom: 12px;">
-            <input type="checkbox" id="broadcastPin" /> Закрепить сообщение в канале
+            <input type="checkbox" id="broadcastPin" /> Закрепить сообщение в канале и в CRM
           </label>
-          <button class="btn primary" onclick="sendBroadcast()">📤 Отправить в канал</button>
+          <button class="btn primary" onclick="sendBroadcast()">📤 Отправить и сохранить</button>
 
           <hr style="border:none; border-top:1px solid var(--border); margin: 18px 0;" />
 
@@ -863,6 +904,82 @@
   </div>
 </div>
 
+<!-- MODAL: TABLE LINK CREATE / EDIT -->
+<div id="tableModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="tableModalTitle">Новая таблица</span>
+      <button class="btn sm" onclick="closeModal('tableModal')">✕</button>
+    </div>
+    <input type="hidden" id="tableEditId" />
+    <div class="form-group">
+      <label>Название таблицы</label>
+      <input type="text" id="tableTitleInput" placeholder="Например: Ведомость БРС по экономике / Запись на доклады" />
+    </div>
+    <div class="form-group">
+      <label>Ссылка (URL)</label>
+      <input type="url" id="tableUrlInput" placeholder="https://docs.google.com/spreadsheets/..." />
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Предмет</label>
+        <select id="tableSubjectSelect" onchange="toggleCustomSubject('tableSubjectSelect', 'tableSubjectCustom')"></select>
+        <input type="text" id="tableSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Введите название предмета..." />
+      </div>
+      <div class="form-group">
+        <label>Категория / метка</label>
+        <input type="text" id="tableCategoryInput" placeholder="БРС, Оценки, Запись, Посещаемость..." />
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Комментарий (что внутри, необязательно)</label>
+      <textarea id="tableDescInput" style="min-height:70px;" placeholder="Например: дедлайн записи до пятницы, вкладка 216 группа"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Порядок сортировки (меньше = выше)</label>
+      <input type="number" id="tableSortOrder" value="0" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('tableModal')">Отмена</button>
+      <button class="btn primary" onclick="saveTable()">💾 Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ANNOUNCEMENT CREATE / EDIT -->
+<div id="announcementModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="annModalTitle">Новое объявление</span>
+      <button class="btn sm" onclick="closeModal('announcementModal')">✕</button>
+    </div>
+    <input type="hidden" id="annEditId" />
+    <div class="form-group">
+      <label>Заголовок</label>
+      <input type="text" id="annTitleInput" placeholder="Важное объявление" />
+    </div>
+    <div class="form-group">
+      <label>Текст объявления</label>
+      <textarea id="annBodyInput" placeholder="Напишите важную информацию для группы..."></textarea>
+    </div>
+    <label class="checkbox-row" style="margin-bottom: 10px;">
+      <input type="checkbox" id="annPinnedCheck" checked /> Закрепить на главной странице CRM
+    </label>
+    <div id="annChannelOptionsWrap" style="margin-bottom: 8px; padding-top: 8px; border-top: 1px solid var(--border);">
+      <label class="checkbox-row" style="margin-bottom: 8px;">
+        <input type="checkbox" id="annSendChannelCheck" /> Также отправить в Telegram-канал группы
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" id="annPinChannelCheck" /> И закрепить сообщение в Telegram-канале
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('announcementModal')">Отмена</button>
+      <button class="btn primary" onclick="saveAnnouncement()">💾 Сохранить</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast"></div>
 
 <script>
@@ -882,8 +999,11 @@
     schedule: [],
     tasks: [],
     materials: [],
+    announcements: [],
+    tables_links: [],
     schedFilter: 'upcoming',
     taskFilter: 'active',
+    annFilter: 'all',
     calYear: null,
     calMonth: null,
     selectedCalDate: '',
@@ -947,7 +1067,9 @@
       data = await res.json();
     }
     if (!res.ok) {
-      throw new Error(data.error || `Ошибка сервера (${res.status})`);
+      const err = new Error(data.error || `Ошибка сервера (${res.status})`);
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
@@ -955,10 +1077,17 @@
   async function initApp() {
     try {
       if (tg && tg.initData) {
-        await apiFetch('/api/auth/tg-session', { method: 'POST' });
+        try {
+          await apiFetch('/api/auth/tg-session', { method: 'POST' });
+        } catch (tgErr) {
+          console.warn('tg-session skipped:', tgErr);
+        }
       }
       await loadBootstrap();
     } catch (e) {
+      if (e && e.status && e.status !== 401) {
+        document.getElementById('loginErr').textContent = e.message || 'Не удалось загрузить CRM';
+      }
       document.getElementById('loginView').classList.remove('hidden');
       document.getElementById('appView').classList.add('hidden');
     }
@@ -1009,6 +1138,8 @@
     STATE.schedule = data.schedule;
     STATE.tasks = data.tasks;
     STATE.materials = data.materials;
+    STATE.announcements = data.announcements || [];
+    STATE.tables_links = data.tables_links || [];
 
     document.getElementById('loginView').classList.add('hidden');
     document.getElementById('appView').classList.remove('hidden');
@@ -1045,11 +1176,13 @@
     renderSchedule();
     renderCalendar();
     renderTasks();
+    renderTables();
+    renderAnnouncements();
     renderMaterials();
   }
 
   function populateSubjectSelects() {
-    const filterIds = ['schedSubjectFilter', 'calSubjectFilter', 'taskSubjectFilter', 'matSubjectFilter'];
+    const filterIds = ['schedSubjectFilter', 'calSubjectFilter', 'taskSubjectFilter', 'tableSubjectFilter', 'matSubjectFilter'];
     filterIds.forEach(id => {
       const sel = document.getElementById(id);
       const prev = sel.value;
@@ -1061,6 +1194,7 @@
     const modalIds = [
       { id: 'taskSubjectSelect', allowGeneral: false },
       { id: 'lessonSubjectSelect', allowGeneral: false },
+      { id: 'tableSubjectSelect', allowGeneral: true },
       { id: 'matSubjectSelect', allowGeneral: true }
     ];
     modalIds.forEach(({ id, allowGeneral }) => {
@@ -1087,7 +1221,7 @@
 
   function switchTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
-    ['schedule', 'calendar', 'tasks', 'materials', 'admin'].forEach(t => {
+    ['schedule', 'calendar', 'tasks', 'tables', 'announcements', 'materials', 'admin'].forEach(t => {
       document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tabName);
     });
     if (tabName === 'calendar') renderCalendar();
@@ -1295,7 +1429,42 @@
     `;
   }
 
+  function linkifyText(text) {
+    const escaped = esc(text || '');
+    return escaped.replace(/(https?:\/\/[^\s<]+)/g, url =>
+      `<a href="${url}" target="_blank" style="color:var(--primary); font-weight:600; word-break:break-all;">${url}</a>`
+    );
+  }
+
   function renderSchedule() {
+    // Закреплённые (или последнее важное) объявления на главном экране
+    const bannerEl = document.getElementById('pinnedAnnouncementsBanner');
+    if (bannerEl) {
+      const pinnedAnns = STATE.announcements.filter(a => a.is_pinned);
+      const shownAnns = pinnedAnns.length ? pinnedAnns.slice(0, 3) : STATE.announcements.slice(0, 1);
+      if (!shownAnns.length) {
+        bannerEl.innerHTML = '';
+      } else {
+        bannerEl.innerHTML = `
+          <div class="card" style="border-left: 4px solid var(--amber); background: rgba(245, 158, 11, 0.08);">
+            <div class="section-title" style="margin-bottom: 8px;">
+              <span>📢 ${pinnedAnns.length ? 'Важные объявления' : 'Последнее объявление'}</span>
+              <button class="btn sm" onclick="switchTab('announcements')">Все (${STATE.announcements.length}) →</button>
+            </div>
+            ${shownAnns.map(a => `
+              <div style="padding: 8px 0; border-top: 1px solid var(--border);">
+                <div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:4px;">
+                  <strong>${a.is_pinned ? '📌 ' : ''}${esc(a.title || 'Важное объявление')}</strong>
+                  <span class="muted-text">${esc(a.created_at)}</span>
+                </div>
+                <div style="font-size:13.5px; line-height:1.45; white-space:pre-wrap;">${linkifyText(a.body)}</div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+    }
+
     const todayLessons = STATE.schedule.filter(l => l.lesson_date === STATE.today);
     document.getElementById('todayCount').textContent = todayLessons.length;
     const todayEl = document.getElementById('todayLessonsContainer');
@@ -1320,6 +1489,21 @@
       tmEl.innerHTML = Array.from(telemostMap.entries()).map(([subj, url]) =>
         `<a class="btn sm green" href="${esc(url)}" target="_blank">🎥 ${esc(subj.length > 42 ? subj.slice(0, 40) + '…' : subj)}</a>`
       ).join('');
+    }
+
+    // Быстрый доступ к актуальным таблицам на главной
+    const quickTablesCard = document.getElementById('quickTablesCard');
+    const quickTablesEl = document.getElementById('quickTablesContainer');
+    if (quickTablesCard && quickTablesEl) {
+      if (!STATE.tables_links.length) {
+        quickTablesCard.classList.add('hidden');
+        quickTablesEl.innerHTML = '';
+      } else {
+        quickTablesCard.classList.remove('hidden');
+        quickTablesEl.innerHTML = STATE.tables_links.slice(0, 8).map(tb =>
+          `<a class="btn sm primary" href="${esc(tb.url)}" target="_blank">📊 ${esc(tb.title)}</a>`
+        ).join('');
+      }
     }
 
     // Полный список расписания с фильтрами
@@ -1979,7 +2163,240 @@
     }
   }
 
+  // --- TABLES LINKS ---
+  function renderTables() {
+    const search = (document.getElementById('tableSearch')?.value || '').toLowerCase();
+    const subjFilter = document.getElementById('tableSubjectFilter')?.value || '';
+    const isAdmin = STATE.auth.role === 'admin';
+    const el = document.getElementById('tablesContainer');
+    if (!el) return;
+
+    const filtered = STATE.tables_links.filter(tb => {
+      if (subjFilter && tb.subject !== subjFilter) return false;
+      if (search && !(`${tb.title} ${tb.subject} ${tb.category} ${tb.description}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    if (!filtered.length) {
+      el.innerHTML = `<div class="card"><p class="muted-text">${STATE.tables_links.length ? 'По запросу таблицы не найдены.' : 'Таблицы пока не добавлены. Староста может добавить сюда ссылки на БРС, ведомости, таблицы записи и Google/Яндекс Таблицы.'}</p></div>`;
+      return;
+    }
+
+    el.innerHTML = filtered.map(tb => `
+      <div class="card" style="display:flex; flex-direction:column; gap:10px; justify-content:space-between;">
+        <div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+            ${tb.category ? `<span class="badge amber">🏷 ${esc(tb.category)}</span>` : ''}
+            ${tb.subject ? `<span class="badge">${esc(tb.subject)}</span>` : ''}
+          </div>
+          <div style="font-size:15.5px; font-weight:700; margin-bottom:4px;">📊 ${esc(tb.title)}</div>
+          ${tb.description ? `<div style="font-size:13.5px; color:var(--muted); white-space:pre-wrap; line-height:1.45;">${linkifyText(tb.description)}</div>` : ''}
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; padding-top:8px; border-top:1px solid var(--border);">
+          <a class="btn sm primary" href="${esc(tb.url)}" target="_blank">🔗 Открыть таблицу</a>
+          ${isAdmin ? `
+            <div style="display:flex; gap:6px;">
+              <button class="btn sm" onclick="openTableModal(${tb.id})">✏️</button>
+              <button class="btn sm red" onclick="deleteTable(${tb.id})">🗑</button>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function openTableModal(id = null) {
+    document.getElementById('tableEditId').value = id || '';
+    document.getElementById('tableSubjectCustom').classList.add('hidden');
+    document.getElementById('tableSubjectCustom').value = '';
+    if (id) {
+      const tb = STATE.tables_links.find(x => x.id === id);
+      if (!tb) return;
+      document.getElementById('tableModalTitle').textContent = 'Редактировать таблицу';
+      document.getElementById('tableTitleInput').value = tb.title || '';
+      document.getElementById('tableUrlInput').value = tb.url || '';
+      document.getElementById('tableCategoryInput').value = tb.category || '';
+      document.getElementById('tableDescInput').value = tb.description || '';
+      document.getElementById('tableSortOrder').value = tb.sort_order ?? 0;
+      const sel = document.getElementById('tableSubjectSelect');
+      const targetSubj = tb.subject || 'Общее / Организационное';
+      if ([...sel.options].some(o => o.value === targetSubj)) {
+        sel.value = targetSubj;
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('tableSubjectCustom').classList.remove('hidden');
+        document.getElementById('tableSubjectCustom').value = targetSubj;
+      }
+    } else {
+      document.getElementById('tableModalTitle').textContent = 'Новая таблица';
+      document.getElementById('tableTitleInput').value = '';
+      document.getElementById('tableUrlInput').value = '';
+      document.getElementById('tableCategoryInput').value = '';
+      document.getElementById('tableDescInput').value = '';
+      document.getElementById('tableSortOrder').value = 0;
+      const sel = document.getElementById('tableSubjectSelect');
+      if (sel.options.length) sel.selectedIndex = 0;
+    }
+    openModal('tableModal');
+  }
+
+  async function saveTable() {
+    const id = document.getElementById('tableEditId').value;
+    const payload = {
+      title: document.getElementById('tableTitleInput').value.trim(),
+      url: document.getElementById('tableUrlInput').value.trim(),
+      subject: getSelectedSubject('tableSubjectSelect', 'tableSubjectCustom'),
+      category: document.getElementById('tableCategoryInput').value.trim(),
+      description: document.getElementById('tableDescInput').value.trim(),
+      sort_order: Number(document.getElementById('tableSortOrder').value || 0)
+    };
+    if (!payload.title || !payload.url) return showToast('Укажите название таблицы и ссылку');
+    try {
+      await apiFetch(id ? `/api/tables/${id}` : '/api/tables', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      closeModal('tableModal');
+      showToast(id ? 'Таблица обновлена!' : 'Таблица добавлена!');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function deleteTable(id) {
+    if (!confirm('Удалить эту таблицу из списка?')) return;
+    try {
+      await apiFetch(`/api/tables/${id}`, { method: 'DELETE' });
+      showToast('Таблица удалена');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- ANNOUNCEMENTS ---
+  function setAnnFilter(mode, btn) {
+    STATE.annFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderAnnouncements();
+  }
+
+  function renderAnnouncements() {
+    const search = (document.getElementById('annSearch')?.value || '').toLowerCase();
+    const isAdmin = STATE.auth.role === 'admin';
+    const el = document.getElementById('announcementsContainer');
+    if (!el) return;
+
+    const filtered = STATE.announcements.filter(a => {
+      if (STATE.annFilter === 'pinned' && !a.is_pinned) return false;
+      if (search && !(`${a.title} ${a.body}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    if (!filtered.length) {
+      el.innerHTML = `<div class="card"><p class="muted-text">${STATE.announcements.length ? 'По фильтру объявлений нет.' : 'Важных объявлений пока нет. Все важные посты от старосты будут появляться здесь.'}</p></div>`;
+      return;
+    }
+
+    el.innerHTML = filtered.map(a => `
+      <div class="card" style="${a.is_pinned ? 'border-left: 4px solid var(--amber);' : ''}">
+        <div class="section-title" style="margin-bottom:8px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            ${a.is_pinned ? '<span class="badge amber">📌 Закреплено</span>' : '<span class="badge">📢 Объявление</span>'}
+            <span style="font-size:15.5px; font-weight:700;">${esc(a.title || 'Важное объявление')}</span>
+          </div>
+          <span class="muted-text">${esc(a.created_at)}</span>
+        </div>
+        <div style="font-size:14px; line-height:1.5; white-space:pre-wrap; margin-bottom:${isAdmin ? '12px' : '0'};">${linkifyText(a.body)}</div>
+        ${isAdmin ? `
+          <div style="display:flex; gap:8px; flex-wrap:wrap; padding-top:8px; border-top:1px solid var(--border);">
+            <button class="btn sm" onclick="togglePinAnnouncement(${a.id})">${a.is_pinned ? 'Открепить в CRM' : '📌 Закрепить в CRM'}</button>
+            <button class="btn sm" onclick="openAnnouncementModal(${a.id})">✏️ Изменить</button>
+            <button class="btn sm red" onclick="deleteAnnouncement(${a.id})">🗑 Удалить</button>
+          </div>
+        ` : ''}
+      </div>
+    `).join('');
+  }
+
+  function openAnnouncementModal(id = null) {
+    document.getElementById('annEditId').value = id || '';
+    const chWrap = document.getElementById('annChannelOptionsWrap');
+    if (id) {
+      const a = STATE.announcements.find(x => x.id === id);
+      if (!a) return;
+      document.getElementById('annModalTitle').textContent = 'Редактировать объявление';
+      document.getElementById('annTitleInput').value = a.title || '';
+      document.getElementById('annBodyInput').value = a.body || '';
+      document.getElementById('annPinnedCheck').checked = Boolean(a.is_pinned);
+      chWrap.classList.add('hidden');
+    } else {
+      document.getElementById('annModalTitle').textContent = 'Новое объявление';
+      document.getElementById('annTitleInput').value = '';
+      document.getElementById('annBodyInput').value = '';
+      document.getElementById('annPinnedCheck').checked = true;
+      document.getElementById('annSendChannelCheck').checked = false;
+      document.getElementById('annPinChannelCheck').checked = false;
+      chWrap.classList.remove('hidden');
+    }
+    openModal('announcementModal');
+  }
+
+  async function saveAnnouncement() {
+    const id = document.getElementById('annEditId').value;
+    const payload = {
+      title: document.getElementById('annTitleInput').value.trim(),
+      body: document.getElementById('annBodyInput').value.trim(),
+      is_pinned: document.getElementById('annPinnedCheck').checked,
+      send_to_channel: !id && document.getElementById('annSendChannelCheck').checked,
+      pin_in_channel: !id && document.getElementById('annPinChannelCheck').checked
+    };
+    if (!payload.body) return showToast('Введите текст объявления');
+    try {
+      await apiFetch(id ? `/api/announcements/${id}` : '/api/announcements', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      closeModal('announcementModal');
+      showToast(id ? 'Объявление обновлено!' : 'Объявление опубликовано!');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function togglePinAnnouncement(id) {
+    const a = STATE.announcements.find(x => x.id === id);
+    if (!a) return;
+    try {
+      await apiFetch(`/api/announcements/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: a.title, body: a.body, is_pinned: !a.is_pinned })
+      });
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function deleteAnnouncement(id) {
+    if (!confirm('Удалить это объявление из CRM?')) return;
+    try {
+      await apiFetch(`/api/announcements/${id}`, { method: 'DELETE' });
+      showToast('Объявление удалено');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
   async function sendBroadcast() {
+    const title = document.getElementById('broadcastTitle').value.trim();
     const text = document.getElementById('broadcastText').value.trim();
     const pin = document.getElementById('broadcastPin').checked;
     if (!text) return showToast('Введите текст объявления');
@@ -1987,10 +2404,12 @@
       await apiFetch('/api/admin/broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, pin })
+        body: JSON.stringify({ title, text, pin })
       });
+      document.getElementById('broadcastTitle').value = '';
       document.getElementById('broadcastText').value = '';
-      showToast('Объявление отправлено в канал!');
+      showToast('Объявление отправлено в канал и сохранено в CRM!');
+      await loadBootstrap();
     } catch (e) {
       showToast(e.message, 4000);
     }
