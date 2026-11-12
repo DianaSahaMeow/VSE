@@ -26,8 +26,8 @@ DB_PORT = int(os.environ.get("DB_PORT", "5432"))
 DB_NAME = os.environ.get("DB_NAME", "postgres")
 
 # --- НАСТРОЙКИ ДОСТУПА К CRM ---
-DEFAULT_ADMIN_PASSWORD = os.environ.get("CRM_PASSWORD", "starosta2026")
-DEFAULT_STUDENT_PASSWORD = os.environ.get("STUDENT_PASSWORD", "biotech216")
+DEFAULT_ADMIN_PASSWORD = os.environ.get("CRM_PASSWORD", "340568")
+DEFAULT_STUDENT_PASSWORD = os.environ.get("STUDENT_PASSWORD", "")
 
 DEFAULT_SUBJECTS = [
     "Молекулярная биология и геномика в растениеводстве",
