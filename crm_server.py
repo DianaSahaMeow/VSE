@@ -1,1131 +1,2027 @@
-import datetime as dt_mod
-import hashlib
-import hmac
-import io
-import json
-import logging
-import os
-import time
-from urllib.parse import quote
-
-from aiohttp import web
-from aiogram.enums import ParseMode
-from aiogram.types import BufferedInputFile
-from aiogram.utils.web_app import safe_parse_webapp_init_data
-
-import schedule_parser
-from config import (
-    ADMIN_ID,
-    BOT_TOKEN,
-    CHANNEL_ID,
-    DEFAULT_ADMIN_PASSWORD,
-    DEFAULT_STUDENT_PASSWORD,
-    MSK,
-    clean_html,
-    get_crm_base_url,
-    now_msk,
-)
-from task_sync import (
-    delete_task_completely,
-    get_all_subjects,
-    publish_task_to_channel,
-    sync_task_attachments_in_channel,
-    sync_task_edit_to_channel,
-    update_pinned_post,
-)
-
-MAX_UPLOAD_MB = 25
-MAX_FILE_BYTES = 15 * 1024 * 1024
-SESSION_TTL_SEC = 60 * 60 * 24 * 14  # 14 дней
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_HTML_PATH = os.path.join(_BASE_DIR, "web", "crm.html")
-FALLBACK_WEB_HTML_PATH = os.path.join(_BASE_DIR, "crm.html")
-
-
-def _hmac_secret() -> bytes:
-    return hashlib.sha256(f"crm-secret:{BOT_TOKEN}".encode("utf-8")).digest()
-
-
-def make_signed_token(role: str, ttl_seconds: int = SESSION_TTL_SEC, user_id: int = 0, label: str = "") -> str:
-    exp = int(time.time()) + ttl_seconds
-    safe_label = label.replace("|", " ").strip()[:40]
-    payload = f"{role}|{user_id}|{exp}|{safe_label}"
-    sig = hmac.new(_hmac_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"{payload}|{sig}"
-
-
-def verify_signed_token(token: str) -> tuple[str, int, str] | None:
-    if not token or token.count("|") != 4:
-        return None
-    role, uid_str, exp_str, label, sig = token.split("|", 4)
-    if role not in ("admin", "student"):
-        return None
-    payload = f"{role}|{uid_str}|{exp_str}|{label}"
-    expected_sig = hmac.new(_hmac_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected_sig):
-        return None
-    try:
-        exp = int(exp_str)
-        uid = int(uid_str)
-    except ValueError:
-        return None
-    if exp < int(time.time()):
-        return None
-    return role, uid, label
-
-
-def build_admin_magic_link() -> str | None:
-    base = get_crm_base_url()
-    if not base:
-        return None
-    token = make_signed_token("admin", ttl_seconds=60 * 60 * 24 * 7, user_id=ADMIN_ID, label="Староста")
-    return f"{base}/crm?token={quote(token, safe='')}"
-
-
-async def _get_passwords(conn) -> tuple[str, str]:
-    rows = await conn.fetch(
-        "SELECT key, value FROM bot_metadata WHERE key IN ('crm_admin_password', 'crm_student_password')"
-    )
-    data = {r["key"]: r["value"] for r in rows}
-    admin_pw = data["crm_admin_password"] if data.get("crm_admin_password") else DEFAULT_ADMIN_PASSWORD
-    student_pw = data["crm_student_password"] if "crm_student_password" in data else DEFAULT_STUDENT_PASSWORD
-    return admin_pw, student_pw
-
-
-async def _resolve_viewer_auth(request: web.Request, pool) -> dict:
-    """Возвращает авторизацию пользователя; если пароль группы пуст, пускает всех в режиме студента."""
-    auth = _resolve_auth(request)
-    if auth["authenticated"] or not pool:
-        return auth
-    async with pool.acquire() as conn:
-        _, student_pw = await _get_passwords(conn)
-    if not student_pw:
-        return {
-            "authenticated": True,
-            "role": "student",
-            "user_id": 0,
-            "user_name": "Гость (просмотр)",
-            "method": "public",
-        }
-    return auth
-
-
-def _resolve_auth(request: web.Request) -> dict:
-    """Определяет роль пользователя по заголовку Telegram InitData, query dl-токену или cookie."""
-    init_data = request.headers.get("X-Telegram-Init-Data") or ""
-    if init_data:
-        try:
-            parsed = safe_parse_webapp_init_data(token=BOT_TOKEN, init_data=init_data)
-            if parsed.user:
-                uid = parsed.user.id
-                name_parts = [parsed.user.first_name or "", parsed.user.last_name or ""]
-                full_name = " ".join(p for p in name_parts if p).strip() or parsed.user.username or str(uid)
-                role = "admin" if uid == ADMIN_ID else "student"
-                return {
-                    "authenticated": True,
-                    "role": role,
-                    "user_id": uid,
-                    "user_name": full_name,
-                    "method": "telegram",
-                }
-        except Exception as exc:
-            logging.warning(f"Невалидный Telegram initData: {exc}")
-
-    for raw_token, method in (
-        (request.query.get("dl", ""), "dl_token"),
-        (request.cookies.get("crm_session", ""), "cookie"),
-    ):
-        if not raw_token:
-            continue
-        verified = verify_signed_token(raw_token)
-        if verified:
-            role, uid, label = verified
-            return {
-                "authenticated": True,
-                "role": role,
-                "user_id": uid,
-                "user_name": label or ("Староста" if role == "admin" else "Студент"),
-                "method": method,
-            }
-
-    return {"authenticated": False, "role": "guest", "user_id": 0, "user_name": None, "method": None}
-
-
-def _require_auth(request: web.Request, admin_only: bool = False) -> dict:
-    auth = _resolve_auth(request)
-    if not auth["authenticated"]:
-        raise web.HTTPUnauthorized(
-            text=json.dumps({"error": "Требуется авторизация"}, ensure_ascii=False),
-            content_type="application/json",
-        )
-    if admin_only and auth["role"] != "admin":
-        raise web.HTTPForbidden(
-            text=json.dumps({"error": "Доступ только для старосты"}, ensure_ascii=False),
-            content_type="application/json",
-        )
-    return auth
-
-
-def _normalize_deadline_input(raw: str) -> str:
-    s = (raw or "").strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%d.%m.%Y %H:%M"):
-        try:
-            dt = dt_mod.datetime.strptime(s, fmt)
-            return dt.strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            continue
-    raise ValueError("Неверный формат дедлайна. Используйте ДД.ММ.ГГГГ ЧЧ:ММ или YYYY-MM-DD HH:MM")
-
-
-async def _read_multipart(request: web.Request) -> tuple[dict[str, str], list[dict]]:
-    """Читает поля формы и загруженные файлы из multipart/form-data."""
-    reader = await request.multipart()
-    fields: dict[str, str] = {}
-    files: list[dict] = []
-
-    while True:
-        part = await reader.next()
-        if part is None:
-            break
-        if part.filename:
-            raw_name = os.path.basename(part.filename).strip() or "file"
-            data = bytearray()
-            while True:
-                chunk = await part.read_chunk(65536)
-                if not chunk:
-                    break
-                data.extend(chunk)
-                if len(data) > MAX_FILE_BYTES:
-                    raise web.HTTPRequestEntityTooLarge(
-                        max_size=MAX_FILE_BYTES,
-                        actual_size=len(data),
-                        text=json.dumps(
-                            {"error": f"Файл «{raw_name}» больше лимита 15 МБ"},
-                            ensure_ascii=False,
-                        ),
-                        content_type="application/json",
-                    )
-            mime = part.headers.get("Content-Type", "application/octet-stream")
-            file_kind = "photo" if mime.startswith("image/") else "document"
-            files.append(
-                {
-                    "file_name": raw_name,
-                    "mime_type": mime,
-                    "file_size": len(data),
-                    "file_data": bytes(data),
-                    "file_kind": file_kind,
-                }
-            )
-        else:
-            fields[part.name] = (await part.read(decode=True)).decode("utf-8", errors="replace")
-    return fields, files
-
-
-def _json(data, status: int = 200) -> web.Response:
-    return web.Response(
-        text=json.dumps(data, ensure_ascii=False, default=str),
-        status=status,
-        content_type="application/json",
-    )
-
-
-async def _serve_file_bytes(bot, row) -> web.Response:
-    file_name = row["file_name"] or "file"
-    mime_type = row["mime_type"] or "application/octet-stream"
-    file_bytes = row["file_data"]
-
-    if file_bytes is None and row["telegram_file_id"]:
-        tg_file = await bot.get_file(row["telegram_file_id"])
-        bio = io.BytesIO()
-        await bot.download_file(tg_file.file_path, destination=bio)
-        file_bytes = bio.getvalue()
-        if "." not in file_name and tg_file.file_path and "." in tg_file.file_path:
-            ext = tg_file.file_path.rsplit(".", 1)[-1]
-            file_name = f"{file_name}.{ext}"
-
-    if file_bytes is None:
-        return _json({"error": "Содержимое файла не найдено"}, status=404)
-
-    encoded_name = quote(file_name)
-    headers = {
-        "Content-Disposition": f"attachment; filename=\"file\"; filename*=UTF-8''{encoded_name}",
-        "Cache-Control": "private, max-age=3600",
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Учебная CRM • Группа 216</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #f3f5f9;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --text: #111827;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: rgba(37, 99, 235, 0.1);
+      --green: #16a34a;
+      --green-soft: rgba(22, 163, 74, 0.12);
+      --red: #dc2626;
+      --red-soft: rgba(220, 38, 38, 0.1);
+      --amber: #d97706;
+      --amber-soft: rgba(217, 119, 6, 0.12);
+      --radius: 14px;
+      --shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
     }
-    return web.Response(body=bytes(file_bytes), content_type=mime_type, headers=headers)
-
-
-def create_web_app(bot, get_db_pool) -> web.Application:
-    app = web.Application(client_max_size=MAX_UPLOAD_MB * 1024 * 1024)
-
-    async def handle_root(request: web.Request):
-        return web.Response(text="Бот активен и работает 24/7!")
-
-    async def handle_crm_page(request: web.Request):
-        magic_token = request.query.get("token", "")
-        if magic_token:
-            verified = verify_signed_token(magic_token)
-            if verified:
-                role, uid, label = verified
-                session_val = make_signed_token(role, user_id=uid, label=label)
-                resp = web.HTTPFound("/crm")
-                resp.set_cookie(
-                    "crm_session",
-                    session_val,
-                    max_age=SESSION_TTL_SEC,
-                    httponly=True,
-                    samesite="Lax",
-                )
-                return resp
-
-        html_path = WEB_HTML_PATH if os.path.exists(WEB_HTML_PATH) else FALLBACK_WEB_HTML_PATH
-        if not os.path.exists(html_path):
-            return web.Response(text="CRM интерфейс не найден (web/crm.html)", status=404)
-        with open(html_path, "r", encoding="utf-8") as f:
-            return web.Response(text=f.read(), content_type="text/html", charset="utf-8")
-
-    # --- AUTH ---
-    async def api_me(request: web.Request):
-        auth = await _resolve_viewer_auth(request, get_db_pool())
-        dl_token = ""
-        if auth["authenticated"]:
-            dl_token = make_signed_token(
-                auth["role"], ttl_seconds=60 * 60 * 6, user_id=auth["user_id"], label=auth["user_name"] or ""
-            )
-        return _json({**auth, "dl_token": dl_token})
-
-    async def api_tg_session(request: web.Request):
-        """Обменивает Telegram initData на HttpOnly cookie + dl_token для скачивания файлов."""
-        auth = _resolve_auth(request)
-        if not auth["authenticated"]:
-            return _json({"error": "Неверная подпись Telegram WebApp"}, status=401)
-        session_val = make_signed_token(
-            auth["role"], user_id=auth["user_id"], label=auth["user_name"] or ""
-        )
-        dl_token = make_signed_token(
-            auth["role"], ttl_seconds=60 * 60 * 6, user_id=auth["user_id"], label=auth["user_name"] or ""
-        )
-        resp = _json({**auth, "dl_token": dl_token})
-        resp.set_cookie("crm_session", session_val, max_age=SESSION_TTL_SEC, httponly=True, samesite="Lax")
-        return resp
-
-    async def api_login(request: web.Request):
-        pool = get_db_pool()
-        if not pool:
-            return _json({"error": "БД ещё подключается"}, status=503)
-        body = await request.json()
-        password = (body.get("password") or "").strip()
-
-        async with pool.acquire() as conn:
-            admin_pw, student_pw = await _get_passwords(conn)
-
-        if password == admin_pw:
-            role, label, uid = "admin", "Староста", ADMIN_ID
-        elif student_pw and password == student_pw:
-            role, label, uid = "student", "Студент группы", 0
-        else:
-            return _json({"error": "Неверный пароль"}, status=401)
-
-        session_val = make_signed_token(role, user_id=uid, label=label)
-        dl_token = make_signed_token(role, ttl_seconds=60 * 60 * 6, user_id=uid, label=label)
-        resp = _json({"authenticated": True, "role": role, "user_name": label, "dl_token": dl_token})
-        resp.set_cookie("crm_session", session_val, max_age=SESSION_TTL_SEC, httponly=True, samesite="Lax")
-        return resp
-
-    async def api_logout(request: web.Request):
-        resp = _json({"ok": True})
-        resp.del_cookie("crm_session")
-        return resp
-
-    # --- BOOTSTRAP ---
-    async def api_bootstrap(request: web.Request):
-        pool = get_db_pool()
-        if not pool:
-            return _json({"error": "База данных недоступна"}, status=503)
-
-        auth = await _resolve_viewer_auth(request, pool)
-        if not auth["authenticated"]:
-            return _json({"error": "Требуется авторизация"}, status=401)
-
-        async with pool.acquire() as conn:
-            subjects = await get_all_subjects(conn)
-
-            # Расписание
-            sched_rows = await conn.fetch(
-                """
-                SELECT id, lesson_date, start_time, end_time, subject, kind, url, module, COALESCE(teacher, '') AS teacher
-                FROM schedule
-                ORDER BY lesson_date ASC, start_time ASC
-                """
-            )
-            schedule_list = [
-                {
-                    "id": r["id"],
-                    "lesson_date": r["lesson_date"].isoformat(),
-                    "start_time": r["start_time"],
-                    "end_time": r["end_time"],
-                    "subject": r["subject"],
-                    "kind": r["kind"],
-                    "url": r["url"],
-                    "module": r["module"] or 1,
-                    "teacher": r["teacher"],
-                }
-                for r in sched_rows
-            ]
-
-            # Задания + файлы (без file_data байтов!; черновики видны только старосте)
-            if auth["role"] == "admin":
-                task_rows = await conn.fetch(
-                    """
-                    SELECT id, subject, description, deadline, submit_url, message_id,
-                           COALESCE(is_published, TRUE) AS is_published
-                    FROM tasks
-                    ORDER BY deadline ASC
-                    """
-                )
-            else:
-                task_rows = await conn.fetch(
-                    """
-                    SELECT id, subject, description, deadline, submit_url, message_id,
-                           COALESCE(is_published, TRUE) AS is_published
-                    FROM tasks
-                    WHERE COALESCE(is_published, TRUE) = TRUE
-                    ORDER BY deadline ASC
-                    """
-                )
-            tfile_rows = await conn.fetch(
-                "SELECT id, task_id, file_name, mime_type, file_size, file_kind FROM task_files ORDER BY id ASC"
-            )
-            files_by_task: dict[int, list[dict]] = {}
-            for tf in tfile_rows:
-                files_by_task.setdefault(tf["task_id"], []).append(
-                    {
-                        "id": tf["id"],
-                        "file_name": tf["file_name"],
-                        "mime_type": tf["mime_type"],
-                        "file_size": tf["file_size"] or 0,
-                        "file_kind": tf["file_kind"] or "document",
-                    }
-                )
-            tasks_list = [
-                {
-                    "id": t["id"],
-                    "subject": t["subject"],
-                    "description": t["description"],
-                    "deadline": t["deadline"],
-                    "submit_url": t["submit_url"] or "",
-                    "message_id": t["message_id"] or 0,
-                    "is_published": bool(t["is_published"]),
-                    "files": files_by_task.get(t["id"], []),
-                }
-                for t in task_rows
-            ]
-
-            # База материалов + файлы
-            mat_rows = await conn.fetch(
-                "SELECT id, subject, title, content_text, external_url, created_at FROM materials ORDER BY created_at DESC"
-            )
-            mfile_rows = await conn.fetch(
-                "SELECT id, material_id, file_name, mime_type, file_size FROM material_files ORDER BY id ASC"
-            )
-            mfiles_by_mat: dict[int, list[dict]] = {}
-            for mf in mfile_rows:
-                mfiles_by_mat.setdefault(mf["material_id"], []).append(
-                    {
-                        "id": mf["id"],
-                        "file_name": mf["file_name"],
-                        "mime_type": mf["mime_type"],
-                        "file_size": mf["file_size"] or 0,
-                    }
-                )
-            materials_list = [
-                {
-                    "id": m["id"],
-                    "subject": m["subject"],
-                    "title": m["title"],
-                    "content_text": m["content_text"] or "",
-                    "external_url": m["external_url"] or "",
-                    "created_at": m["created_at"].strftime("%d.%m.%Y %H:%M") if m["created_at"] else "",
-                    "files": mfiles_by_mat.get(m["id"], []),
-                }
-                for m in mat_rows
-            ]
-
-            db_bytes = await conn.fetchval("SELECT pg_database_size(current_database())")
-            admin_info = {}
-            if auth["role"] == "admin":
-                admin_pw, student_pw = await _get_passwords(conn)
-                admin_info = {
-                    "student_password": student_pw,
-                    "admin_password_set": bool(admin_pw),
-                    "crm_url": f"{get_crm_base_url()}/crm" if get_crm_base_url() else "/crm",
-                }
-
-        dl_token = make_signed_token(
-            auth["role"], ttl_seconds=60 * 60 * 6, user_id=auth["user_id"], label=auth["user_name"] or ""
-        )
-        return _json(
-            {
-                "auth": {**auth, "dl_token": dl_token},
-                "today": now_msk().strftime("%Y-%m-%d"),
-                "subjects": subjects,
-                "schedule": schedule_list,
-                "tasks": tasks_list,
-                "materials": materials_list,
-                "db_size_mb": round((db_bytes or 0) / (1024 * 1024), 2),
-                "admin_info": admin_info,
-            }
-        )
-
-    # --- TASKS & FILES ---
-    async def api_create_task(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-        fields, files = await _read_multipart(request)
-
-        subject = (fields.get("subject") or "").strip()
-        description = (fields.get("description") or "").strip()
-        deadline_raw = (fields.get("deadline") or "").strip()
-        submit_url = (fields.get("submit_url") or "").strip() or "Уточняется (будет добавлено позже)"
-        publish = fields.get("publish", "true").lower() in ("1", "true", "yes", "on")
-
-        if not subject or not description or not deadline_raw:
-            return _json({"error": "Заполните предмет, описание и дедлайн"}, status=400)
-        try:
-            deadline_iso = _normalize_deadline_input(deadline_raw)
-        except ValueError as exc:
-            return _json({"error": str(exc)}, status=400)
-
-        async with pool.acquire() as conn:
-            task_id = await conn.fetchval(
-                """
-                INSERT INTO tasks (subject, description, deadline, submit_url, file_id, message_id, is_published)
-                VALUES ($1, $2, $3, $4, NULL, 0, $5)
-                RETURNING id
-                """,
-                subject,
-                description,
-                deadline_iso,
-                submit_url,
-                publish,
-            )
-            for f in files:
-                await conn.execute(
-                    """
-                    INSERT INTO task_files (task_id, file_name, mime_type, file_size, file_data, file_kind)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    """,
-                    task_id,
-                    f["file_name"],
-                    f["mime_type"],
-                    f["file_size"],
-                    f["file_data"],
-                    f["file_kind"],
-                )
-
-        if publish:
-            await publish_task_to_channel(bot, pool, task_id)
-
-        return _json({"ok": True, "id": task_id}, status=201)
-
-    async def api_update_task(request: web.Request):
-        _require_auth(request, admin_only=True)
-        task_id = int(request.match_info["id"])
-        pool = get_db_pool()
-        body = await request.json()
-
-        subject = (body.get("subject") or "").strip()
-        description = (body.get("description") or "").strip()
-        deadline_raw = (body.get("deadline") or "").strip()
-        submit_url = (body.get("submit_url") or "").strip() or "Уточняется (будет добавлено позже)"
-        notify_channel = bool(body.get("notify_channel", True))
-
-        if not subject or not description or not deadline_raw:
-            return _json({"error": "Заполните предмет, описание и дедлайн"}, status=400)
-        try:
-            deadline_iso = _normalize_deadline_input(deadline_raw)
-        except ValueError as exc:
-            return _json({"error": str(exc)}, status=400)
-
-        async with pool.acquire() as conn:
-            old_row = await conn.fetchrow(
-                """
-                SELECT subject, description, deadline, submit_url, message_id,
-                       COALESCE(is_published, TRUE) AS is_published
-                FROM tasks WHERE id = $1
-                """,
-                task_id,
-            )
-            if not old_row:
-                return _json({"error": "Задание не найдено"}, status=404)
-            old_dict = dict(old_row)
-            was_published = bool(old_row["is_published"])
-
-            deadline_changed = old_dict["deadline"] != deadline_iso
-            await conn.execute(
-                """
-                UPDATE tasks
-                SET subject = $1,
-                    description = $2,
-                    deadline = $3,
-                    submit_url = $4,
-                    notified = CASE WHEN $5 THEN 0 ELSE notified END
-                WHERE id = $6
-                """,
-                subject,
-                description,
-                deadline_iso,
-                submit_url,
-                deadline_changed,
-                task_id,
-            )
-
-        if not was_published:
-            if notify_channel:
-                await publish_task_to_channel(bot, pool, task_id)
-        else:
-            await sync_task_edit_to_channel(bot, pool, task_id, old_dict, notify_channel=notify_channel)
-        return _json({"ok": True})
-
-    async def api_add_task_files(request: web.Request):
-        _require_auth(request, admin_only=True)
-        task_id = int(request.match_info["id"])
-        pool = get_db_pool()
-        fields, files = await _read_multipart(request)
-        if not files:
-            return _json({"error": "Не выбрано ни одного файла"}, status=400)
-
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT COALESCE(is_published, TRUE) AS is_published FROM tasks WHERE id = $1",
-                task_id,
-            )
-            if not row:
-                return _json({"error": "Задание не найдено"}, status=404)
-            is_pub = bool(row["is_published"])
-            for f in files:
-                await conn.execute(
-                    """
-                    INSERT INTO task_files (task_id, file_name, mime_type, file_size, file_data, file_kind)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    """,
-                    task_id,
-                    f["file_name"],
-                    f["mime_type"],
-                    f["file_size"],
-                    f["file_data"],
-                    f["file_kind"],
-                )
-
-        if is_pub:
-            if fields.get("sync_channel", "true").lower() in ("1", "true", "yes"):
-                await sync_task_attachments_in_channel(bot, pool, task_id)
-            else:
-                await update_pinned_post(bot, pool)
-        return _json({"ok": True})
-
-    async def api_delete_task_file(request: web.Request):
-        _require_auth(request, admin_only=True)
-        task_id = int(request.match_info["id"])
-        file_id = int(request.match_info["fid"])
-        pool = get_db_pool()
-
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM task_files WHERE id = $1 AND task_id = $2", file_id, task_id)
-            is_pub = await conn.fetchval(
-                "SELECT COALESCE(is_published, TRUE) FROM tasks WHERE id = $1",
-                task_id,
-            )
-
-        if is_pub:
-            await sync_task_attachments_in_channel(bot, pool, task_id)
-        return _json({"ok": True})
-
-    async def api_delete_task(request: web.Request):
-        _require_auth(request, admin_only=True)
-        task_id = int(request.match_info["id"])
-        pool = get_db_pool()
-        async with pool.acquire() as conn:
-            is_pub = await conn.fetchval(
-                "SELECT COALESCE(is_published, TRUE) FROM tasks WHERE id = $1",
-                task_id,
-            )
-            if not is_pub:
-                await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
-                return _json({"ok": True})
-
-        await delete_task_completely(bot, pool, task_id)
-        return _json({"ok": True})
-
-    async def api_download_task_file(request: web.Request):
-        pool = get_db_pool()
-        auth = await _resolve_viewer_auth(request, pool)
-        if not auth["authenticated"]:
-            raise web.HTTPUnauthorized(
-                text=json.dumps({"error": "Требуется авторизация"}, ensure_ascii=False),
-                content_type="application/json",
-            )
-        file_id = int(request.match_info["fid"])
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, file_name, mime_type, file_data, telegram_file_id FROM task_files WHERE id = $1",
-                file_id,
-            )
-        if not row:
-            return _json({"error": "Файл не найден"}, status=404)
-        return await _serve_file_bytes(bot, row)
-
-    async def api_send_file_to_me(request: web.Request):
-        """Отправляет файл пользователю в ЛС бота (удобно внутри Telegram Mini App)."""
-        auth = _require_auth(request, admin_only=False)
-        if not auth["user_id"]:
-            return _json({"error": "Доступно при открытии через Telegram"}, status=400)
-
-        kind = request.match_info["kind"]  # task | material
-        fid = int(request.match_info["fid"])
-        table = "task_files" if kind == "task" else "material_files"
-        pool = get_db_pool()
-
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT id, file_name, file_data, telegram_file_id FROM {table} WHERE id = $1",
-                fid,
-            )
-            if not row:
-                return _json({"error": "Файл не найден"}, status=404)
-
-            media = (
-                BufferedInputFile(bytes(row["file_data"]), filename=row["file_name"])
-                if row["file_data"] is not None
-                else row["telegram_file_id"]
-            )
-            try:
-                msg = await bot.send_document(
-                    chat_id=auth["user_id"],
-                    document=media,
-                    caption=f"📎 {clean_html(row['file_name'])}",
-                    parse_mode=ParseMode.HTML,
-                )
-                if msg.document and not row["telegram_file_id"]:
-                    await conn.execute(
-                        f"UPDATE {table} SET telegram_file_id = $1 WHERE id = $2",
-                        msg.document.file_id,
-                        fid,
-                    )
-            except Exception as exc:
-                return _json({"error": f"Не удалось отправить в ЛС (нажмите /start в боте): {exc}"}, status=400)
-
-        return _json({"ok": True})
-
-    # --- SCHEDULE & CSV ---
-    async def api_create_lesson(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-        body = await request.json()
-        try:
-            lesson_date = dt_mod.date.fromisoformat((body.get("lesson_date") or "").strip())
-        except ValueError:
-            return _json({"error": "Неверный формат даты (YYYY-MM-DD)"}, status=400)
-
-        start_time = (body.get("start_time") or "").strip()
-        end_time = (body.get("end_time") or "").strip()
-        subject = (body.get("subject") or "").strip()
-        kind = (body.get("kind") or "Семинар").strip()
-        teacher = (body.get("teacher") or "").strip()
-        url = (body.get("url") or "https://telemost.yandex.ru").strip()
-        module = int(body.get("module") or 2)
-
-        if not start_time or not end_time or not subject:
-            return _json({"error": "Укажите дату, время и предмет"}, status=400)
-
-        now = now_msk()
-        is_past = (lesson_date < now.date()) or (lesson_date == now.date() and end_time <= now.strftime("%H:%M"))
-        async with pool.acquire() as conn:
-            lid = await conn.fetchval(
-                """
-                INSERT INTO schedule (lesson_date, start_time, end_time, subject, kind, url, notified, message_id, module, teacher)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9)
-                RETURNING id
-                """,
-                lesson_date,
-                start_time,
-                end_time,
-                subject,
-                kind,
-                url,
-                is_past,
-                module,
-                teacher,
-            )
-        return _json({"ok": True, "id": lid}, status=201)
-
-    async def api_update_lesson(request: web.Request):
-        _require_auth(request, admin_only=True)
-        lid = int(request.match_info["id"])
-        pool = get_db_pool()
-        body = await request.json()
-
-        try:
-            lesson_date = dt_mod.date.fromisoformat((body.get("lesson_date") or "").strip())
-        except ValueError:
-            return _json({"error": "Неверный формат даты (YYYY-MM-DD)"}, status=400)
-
-        start_time = (body.get("start_time") or "").strip()
-        end_time = (body.get("end_time") or "").strip()
-        subject = (body.get("subject") or "").strip()
-        kind = (body.get("kind") or "Семинар").strip()
-        teacher = (body.get("teacher") or "").strip()
-        url = (body.get("url") or "https://telemost.yandex.ru").strip()
-        module = int(body.get("module") or 2)
-
-        now = now_msk()
-        is_future = (lesson_date > now.date()) or (lesson_date == now.date() and end_time > now.strftime("%H:%M"))
-
-        async with pool.acquire() as conn:
-            res = await conn.execute(
-                """
-                UPDATE schedule
-                SET lesson_date = $1, start_time = $2, end_time = $3, subject = $4,
-                    kind = $5, url = $6, module = $7, teacher = $8,
-                    notified = CASE WHEN $9 THEN FALSE ELSE notified END
-                WHERE id = $10
-                """,
-                lesson_date,
-                start_time,
-                end_time,
-                subject,
-                kind,
-                url,
-                module,
-                teacher,
-                is_future,
-                lid,
-            )
-        if res == "UPDATE 0":
-            return _json({"error": "Пара не найдена"}, status=404)
-        return _json({"ok": True})
-
-    async def api_delete_lesson(request: web.Request):
-        _require_auth(request, admin_only=True)
-        lid = int(request.match_info["id"])
-        pool = get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM schedule WHERE id = $1", lid)
-        return _json({"ok": True})
-
-    async def api_preview_csv(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-
-        content_type = request.headers.get("Content-Type", "")
-        if "multipart/form-data" in content_type:
-            fields, files = await _read_multipart(request)
-            default_mod = int(fields.get("module") or 2)
-            raw_bytes = files[0]["file_data"] if files else fields.get("csv_text", "").encode("utf-8")
-        else:
-            body = await request.json()
-            default_mod = int(body.get("module") or 2)
-            raw_bytes = (body.get("csv_text") or "").encode("utf-8")
-
-        if not raw_bytes:
-            return _json({"error": "Пустой CSV"}, status=400)
-
-        parsed = schedule_parser.parse_schedule_csv(raw_bytes, default_module=default_mod)
-        async with pool.acquire() as conn:
-            existing_rows = await conn.fetch("SELECT lesson_date, start_time FROM schedule")
-            existing_set = {(r["lesson_date"].isoformat(), r["start_time"]) for r in existing_rows}
-
-        new_count = sum(1 for item in parsed if (item["lesson_date"], item["start_time"]) not in existing_set)
-        return _json(
-            {
-                "lessons": parsed,
-                "total": len(parsed),
-                "new_count": new_count,
-                "existing_count": len(parsed) - new_count,
-            }
-        )
-
-    async def api_import_csv(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-        body = await request.json()
-        lessons = body.get("lessons") or []
-        mode = body.get("mode", "add_missing")  # add_missing | replace_module
-        target_module = body.get("target_module")
-
-        if not lessons:
-            return _json({"error": "Нет пар для импорта"}, status=400)
-
-        now = now_msk()
-        today = now.date()
-        now_hm = now.strftime("%H:%M")
-
-        inserted = 0
-        updated = 0
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                if mode == "replace_module" and target_module:
-                    await conn.execute("DELETE FROM schedule WHERE module = $1", int(target_module))
-
-                existing_rows = await conn.fetch("SELECT id, lesson_date, start_time FROM schedule")
-                existing_map = {(r["lesson_date"].isoformat(), r["start_time"]): r["id"] for r in existing_rows}
-
-                for item in lessons:
-                    dt = dt_mod.date.fromisoformat(item["lesson_date"])
-                    st = item["start_time"]
-                    et = item["end_time"]
-                    is_past = (dt < today) or (dt == today and et <= now_hm)
-                    mod_val = int(item.get("module") or target_module or 2)
-                    key = (item["lesson_date"], st)
-
-                    if key in existing_map:
-                        await conn.execute(
-                            """
-                            UPDATE schedule
-                            SET end_time = $1, subject = $2, kind = $3, url = $4, module = $5, teacher = $6
-                            WHERE id = $7
-                            """,
-                            et,
-                            item["subject"],
-                            item["kind"],
-                            item["url"],
-                            mod_val,
-                            item.get("teacher", ""),
-                            existing_map[key],
-                        )
-                        updated += 1
-                    else:
-                        await conn.execute(
-                            """
-                            INSERT INTO schedule (lesson_date, start_time, end_time, subject, kind, url, notified, message_id, module, teacher)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9)
-                            """,
-                            dt,
-                            st,
-                            et,
-                            item["subject"],
-                            item["kind"],
-                            item["url"],
-                            is_past,
-                            mod_val,
-                            item.get("teacher", ""),
-                        )
-                        inserted += 1
-
-        return _json({"ok": True, "inserted": inserted, "updated": updated})
-
-    # --- MATERIALS & TEXTS ---
-    async def api_create_material(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-        fields, files = await _read_multipart(request)
-
-        subject = (fields.get("subject") or "").strip() or "Общее / Организационное"
-        title = (fields.get("title") or "").strip()
-        content_text = (fields.get("content_text") or "").strip()
-        external_url = (fields.get("external_url") or "").strip()
-
-        if not title:
-            return _json({"error": "Укажите заголовок материала"}, status=400)
-
-        async with pool.acquire() as conn:
-            mid = await conn.fetchval(
-                """
-                INSERT INTO materials (subject, title, content_text, external_url)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id
-                """,
-                subject,
-                title,
-                content_text,
-                external_url,
-            )
-            for f in files:
-                await conn.execute(
-                    """
-                    INSERT INTO material_files (material_id, file_name, mime_type, file_size, file_data)
-                    VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    mid,
-                    f["file_name"],
-                    f["mime_type"],
-                    f["file_size"],
-                    f["file_data"],
-                )
-        return _json({"ok": True, "id": mid}, status=201)
-
-    async def api_update_material(request: web.Request):
-        _require_auth(request, admin_only=True)
-        mid = int(request.match_info["id"])
-        pool = get_db_pool()
-        body = await request.json()
-
-        subject = (body.get("subject") or "").strip() or "Общее / Организационное"
-        title = (body.get("title") or "").strip()
-        content_text = (body.get("content_text") or "").strip()
-        external_url = (body.get("external_url") or "").strip()
-        if not title:
-            return _json({"error": "Укажите заголовок"}, status=400)
-
-        async with pool.acquire() as conn:
-            res = await conn.execute(
-                """
-                UPDATE materials
-                SET subject = $1, title = $2, content_text = $3, external_url = $4
-                WHERE id = $5
-                """,
-                subject,
-                title,
-                content_text,
-                external_url,
-                mid,
-            )
-        if res == "UPDATE 0":
-            return _json({"error": "Материал не найден"}, status=404)
-        return _json({"ok": True})
-
-    async def api_add_material_files(request: web.Request):
-        _require_auth(request, admin_only=True)
-        mid = int(request.match_info["id"])
-        pool = get_db_pool()
-        _, files = await _read_multipart(request)
-        if not files:
-            return _json({"error": "Выберите файлы"}, status=400)
-
-        async with pool.acquire() as conn:
-            for f in files:
-                await conn.execute(
-                    """
-                    INSERT INTO material_files (material_id, file_name, mime_type, file_size, file_data)
-                    VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    mid,
-                    f["file_name"],
-                    f["mime_type"],
-                    f["file_size"],
-                    f["file_data"],
-                )
-        return _json({"ok": True})
-
-    async def api_delete_material_file(request: web.Request):
-        _require_auth(request, admin_only=True)
-        mid = int(request.match_info["id"])
-        fid = int(request.match_info["fid"])
-        pool = get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM material_files WHERE id = $1 AND material_id = $2", fid, mid)
-        return _json({"ok": True})
-
-    async def api_delete_material(request: web.Request):
-        _require_auth(request, admin_only=True)
-        mid = int(request.match_info["id"])
-        pool = get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM materials WHERE id = $1", mid)
-        return _json({"ok": True})
-
-    async def api_download_material_file(request: web.Request):
-        pool = get_db_pool()
-        auth = await _resolve_viewer_auth(request, pool)
-        if not auth["authenticated"]:
-            raise web.HTTPUnauthorized(
-                text=json.dumps({"error": "Требуется авторизация"}, ensure_ascii=False),
-                content_type="application/json",
-            )
-        fid = int(request.match_info["fid"])
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, file_name, mime_type, file_data, telegram_file_id FROM material_files WHERE id = $1",
-                fid,
-            )
-        if not row:
-            return _json({"error": "Файл не найден"}, status=404)
-        return await _serve_file_bytes(bot, row)
-
-    # --- ADMIN TOOLS ---
-    async def api_admin_refresh_pin(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-        await update_pinned_post(bot, pool)
-        return _json({"ok": True})
-
-    async def api_admin_broadcast(request: web.Request):
-        _require_auth(request, admin_only=True)
-        body = await request.json()
-        raw_text = (body.get("text") or "").strip()
-        pin = bool(body.get("pin", False))
-        if not raw_text:
-            return _json({"error": "Введите текст объявления"}, status=400)
-
-        full_text = (
-            f"🚨 <b>Важное объявление</b> #инфо\n\n"
-            f"{clean_html(raw_text)}\n\n"
-            f"Просьба ознакомиться!"
-        )
-        msg = await bot.send_message(chat_id=CHANNEL_ID, text=full_text, parse_mode=ParseMode.HTML)
-        if pin:
-            await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=msg.message_id)
-        return _json({"ok": True, "message_id": msg.message_id})
-
-    async def api_admin_passwords(request: web.Request):
-        _require_auth(request, admin_only=True)
-        pool = get_db_pool()
-        body = await request.json()
-        new_student_pw = (body.get("student_password") or "").strip()
-        new_admin_pw = (body.get("admin_password") or "").strip()
-
-        async with pool.acquire() as conn:
-            if "student_password" in body:
-                await conn.execute(
-                    """
-                    INSERT INTO bot_metadata (key, value) VALUES ('crm_student_password', $1)
-                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-                    """,
-                    new_student_pw,
-                )
-            if new_admin_pw:
-                await conn.execute(
-                    """
-                    INSERT INTO bot_metadata (key, value) VALUES ('crm_admin_password', $1)
-                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-                    """,
-                    new_admin_pw,
-                )
-        return _json({"ok": True})
-
-    app.router.add_get("/", handle_root)
-    app.router.add_get("/health", handle_root)
-    app.router.add_get("/crm", handle_crm_page)
-
-    app.router.add_get("/api/me", api_me)
-    app.router.add_post("/api/auth/tg-session", api_tg_session)
-    app.router.add_post("/api/auth/login", api_login)
-    app.router.add_post("/api/auth/logout", api_logout)
-    app.router.add_get("/api/bootstrap", api_bootstrap)
-
-    app.router.add_post("/api/tasks", api_create_task)
-    app.router.add_put("/api/tasks/{id}", api_update_task)
-    app.router.add_post("/api/tasks/{id}/files", api_add_task_files)
-    app.router.add_delete("/api/tasks/{id}/files/{fid}", api_delete_task_file)
-    app.router.add_delete("/api/tasks/{id}", api_delete_task)
-    app.router.add_get("/api/task-files/{fid}", api_download_task_file)
-
-    app.router.add_post("/api/files/{kind}/{fid}/send-to-me", api_send_file_to_me)
-
-    app.router.add_post("/api/schedule", api_create_lesson)
-    app.router.add_put("/api/schedule/{id}", api_update_lesson)
-    app.router.add_delete("/api/schedule/{id}", api_delete_lesson)
-    app.router.add_post("/api/schedule/preview-csv", api_preview_csv)
-    app.router.add_post("/api/schedule/import-csv", api_import_csv)
-
-    app.router.add_post("/api/materials", api_create_material)
-    app.router.add_put("/api/materials/{id}", api_update_material)
-    app.router.add_post("/api/materials/{id}/files", api_add_material_files)
-    app.router.add_delete("/api/materials/{id}/files/{fid}", api_delete_material_file)
-    app.router.add_delete("/api/materials/{id}", api_delete_material)
-    app.router.add_get("/api/material-files/{fid}", api_download_material_file)
-
-    app.router.add_post("/api/admin/refresh-pin", api_admin_refresh_pin)
-    app.router.add_post("/api/admin/broadcast", api_admin_broadcast)
-    app.router.add_post("/api/admin/passwords", api_admin_passwords)
-
-    return app
+
+    html.dark {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface-2: #273449;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --border: #334155;
+      --primary: #3b82f6;
+      --primary-hover: #60a5fa;
+      --primary-soft: rgba(59, 130, 246, 0.16);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.16);
+      --red: #ef4444;
+      --red-soft: rgba(239, 68, 68, 0.16);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.16);
+      --shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding-bottom: 84px;
+    }
+
+    .container { max-width: 1080px; margin: 0 auto; padding: 14px 16px; }
+
+    /* Header */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      box-shadow: var(--shadow);
+    }
+    .topbar-inner {
+      max-width: 1080px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand h1 { font-size: 18px; font-weight: 700; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+    .badge.green { background: var(--green-soft); color: var(--green); }
+    .badge.red { background: var(--red-soft); color: var(--red); }
+    .badge.amber { background: var(--amber-soft); color: var(--amber); }
+    .badge.muted { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+    /* Nav tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin: 14px 0;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 9px 15px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: 0.15s ease;
+    }
+    .tab-btn.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    /* Buttons & Inputs */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 8px 13px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: 0.15s ease;
+    }
+    .btn:hover { border-color: var(--primary); }
+    .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .btn.primary:hover { background: var(--primary-hover); }
+    .btn.green { background: var(--green); color: #fff; border-color: var(--green); }
+    .btn.red { background: var(--red-soft); color: var(--red); border-color: transparent; }
+    .btn.sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    input, select, textarea {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    textarea { min-height: 90px; resize: vertical; }
+    label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+
+    /* Cards & Grids */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 15px;
+      box-shadow: var(--shadow);
+      margin-bottom: 12px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+      gap: 12px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .toolbar > input { flex: 1; min-width: 190px; }
+    .toolbar > select { width: auto; min-width: 180px; max-width: 100%; }
+
+    .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .pill {
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .pill.active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
+
+    /* Files */
+    .files-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+    .file-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+      flex: 1;
+    }
+    .file-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    /* Dropzone */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+    .dropzone.dragover { border-color: var(--primary); background: var(--primary-soft); }
+
+    /* Lessons */
+    .lesson-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .lesson-time { font-weight: 700; font-size: 15px; color: var(--primary); min-width: 100px; }
+    .lesson-info { flex: 1; min-width: 220px; }
+    .lesson-subj { font-weight: 600; font-size: 14px; }
+    .lesson-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Calendar */
+    .cal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .cal-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .cal-month-title {
+      font-size: 17px;
+      font-weight: 700;
+      min-width: 145px;
+      text-align: center;
+      text-transform: capitalize;
+    }
+    .cal-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .cal-weekday {
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      padding: 4px 0;
+    }
+    .cal-weekday.weekend { color: var(--red); opacity: 0.8; }
+    .cal-cell {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      min-height: 84px;
+      padding: 6px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: 0.14s ease;
+      overflow: hidden;
+    }
+    .cal-cell:hover { border-color: var(--primary); }
+    .cal-cell.is-other-month { opacity: 0.42; }
+    .cal-cell.is-today { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+    .cal-cell.is-selected {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--primary-soft);
+    }
+    .cal-cell-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+    }
+    .cal-day-num {
+      font-size: 13px;
+      font-weight: 700;
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+    }
+    .cal-cell.is-today .cal-day-num {
+      background: var(--primary);
+      color: #fff;
+    }
+    .cal-cell.is-weekend .cal-day-num { color: var(--red); }
+    .cal-cell.is-today.is-weekend .cal-day-num { color: #fff; }
+    .cal-chips {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .cal-chip {
+      font-size: 11px;
+      line-height: 1.25;
+      padding: 2px 5px;
+      border-radius: 5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+    .cal-chip.lesson { background: var(--primary-soft); color: var(--primary); }
+    .cal-chip.deadline { background: var(--red-soft); color: var(--red); }
+    .cal-chip.deadline-old { background: var(--amber-soft); color: var(--amber); opacity: 0.85; }
+    .cal-more { font-size: 10px; color: var(--muted); font-weight: 600; padding-left: 2px; }
+    .cal-dots { display: none; gap: 3px; flex-wrap: wrap; align-items: center; margin-top: auto; }
+    .cal-dot-pill {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 999px;
+      line-height: 1.3;
+    }
+    .cal-dot-pill.lesson { background: var(--primary-soft); color: var(--primary); }
+    .cal-dot-pill.deadline { background: var(--red-soft); color: var(--red); }
+    .cal-dot-pill.deadline-old { background: var(--amber-soft); color: var(--amber); }
+    .cal-legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    @media (max-width: 640px) {
+      .cal-grid { gap: 4px; }
+      .cal-cell { min-height: 54px; padding: 4px; border-radius: 8px; }
+      .cal-day-num { font-size: 12px; width: 21px; height: 21px; }
+      .cal-chips { display: none; }
+      .cal-dots { display: flex; }
+    }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      backdrop-filter: blur(2px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 14px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 560px;
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 18px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+    }
+    .modal-title { font-size: 17px; font-weight: 700; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
+    .form-group { margin-bottom: 12px; }
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 540px) { .row-2 { grid-template-columns: 1fr; } }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .checkbox-row input { width: auto; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #111827;
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 200;
+      display: none;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    .toast.show { display: block; }
+
+    /* Login card */
+    .login-wrap {
+      min-height: 85vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .login-card { width: 100%; max-width: 390px; }
+
+    /* Storage bar */
+    .progress-bg { width: 100%; height: 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; margin: 8px 0; }
+    .progress-fill { height: 100%; background: var(--primary); transition: width 0.3s; }
+
+    .pre-text { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+    .hidden { display: none !important; }
+    .muted-text { color: var(--muted); font-size: 13px; }
+    .section-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+
+<div id="loginView" class="login-wrap hidden">
+  <div class="card login-card">
+    <h2 style="margin-bottom: 6px;">📚 Учебная CRM • 216</h2>
+    <p class="muted-text" style="margin-bottom: 16px;">
+      Введите пароль старосты для управления (или пароль группы, если он задан).<br/>
+      Для старосты в Telegram Mini App вход выполняется автоматически по ID.
+    </p>
+    <div class="form-group">
+      <label for="loginPass">Пароль доступа</label>
+      <input type="password" id="loginPass" placeholder="Введите пароль..." onkeydown="if(event.key==='Enter') doLogin()" />
+    </div>
+    <button class="btn primary" style="width:100%;" onclick="doLogin()">Войти</button>
+    <button id="backToAppBtn" class="btn hidden" style="width:100%; margin-top:8px;" onclick="closeLoginView()">← Вернуться к просмотру</button>
+    <p id="loginErr" style="color: var(--red); font-size: 13px; margin-top: 8px;"></p>
+  </div>
+</div>
+
+<div id="appView" class="hidden">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>📚 Учебная CRM</h1>
+        <span id="roleBadge" class="badge">Загрузка...</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn sm" onclick="toggleTheme()" title="Сменить тему">🌓</button>
+        <button class="btn sm" onclick="loadBootstrap()" title="Обновить данные">🔄</button>
+        <button id="adminLoginBtn" class="btn sm primary hidden" onclick="openAdminLogin()">🔑 Староста</button>
+        <button id="logoutBtn" class="btn sm hidden" onclick="doLogout()">Выйти</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="schedule" onclick="switchTab('schedule')">📅 Пары и Телемост</button>
+      <button class="tab-btn" data-tab="calendar" onclick="switchTab('calendar')">🗓 Календарь</button>
+      <button class="tab-btn" data-tab="tasks" onclick="switchTab('tasks')">📌 Задания и Файлы</button>
+      <button class="tab-btn" data-tab="materials" onclick="switchTab('materials')">📚 База знаний</button>
+      <button id="adminTabBtn" class="tab-btn hidden" data-tab="admin" onclick="switchTab('admin')">⚙️ Админка</button>
+    </nav>
+
+    <!-- TAB 1: SCHEDULE -->
+    <section id="tab-schedule">
+      <div class="card">
+        <div class="section-title">
+          <span>🔥 Пары сегодня (<span id="todayStr"></span>)</span>
+          <span class="badge green" id="todayCount">0</span>
+        </div>
+        <div id="todayLessonsContainer"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          <span>🎥 Быстрые ссылки на Телемост</span>
+        </div>
+        <div id="telemostLinksContainer" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          <span>📆 Расписание</span>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;" class="admin-only hidden">
+            <button class="btn sm primary" onclick="openLessonModal()">➕ Добавить пару</button>
+            <button class="btn sm" onclick="switchTab('admin')">📤 Импорт CSV</button>
+          </div>
+        </div>
+        <div class="pill-row">
+          <button class="pill active" onclick="setSchedFilter('upcoming', this)">Предстоящие</button>
+          <button class="pill" onclick="setSchedFilter('all', this)">Все</button>
+          <button class="pill" onclick="setSchedFilter('m2', this)">2 модуль</button>
+          <button class="pill" onclick="setSchedFilter('m3', this)">3 модуль</button>
+          <button class="pill" onclick="setSchedFilter('m4', this)">4 модуль</button>
+        </div>
+        <div class="toolbar">
+          <input type="text" id="schedSearch" placeholder="Поиск по предмету или преподавателю..." oninput="renderSchedule()" />
+          <select id="schedSubjectFilter" onchange="renderSchedule()">
+            <option value="">Все предметы</option>
+          </select>
+        </div>
+        <div id="scheduleListContainer"></div>
+      </div>
+    </section>
+
+    <!-- TAB: CALENDAR -->
+    <section id="tab-calendar" class="hidden">
+      <div class="card">
+        <div class="cal-header">
+          <div class="cal-nav">
+            <button class="btn sm" onclick="changeCalMonth(-1)" title="Предыдущий месяц">◀</button>
+            <div id="calMonthTitle" class="cal-month-title">Месяц</div>
+            <button class="btn sm" onclick="changeCalMonth(1)" title="Следующий месяц">▶</button>
+            <button class="btn sm" onclick="jumpCalToday()">Сегодня</button>
+          </div>
+          <select id="calSubjectFilter" onchange="renderCalendar()" style="width:auto; min-width:190px; max-width:100%;">
+            <option value="">Все предметы</option>
+          </select>
+        </div>
+
+        <div class="pill-row">
+          <button class="pill active" onclick="setCalKindFilter('all', this)">Всё вместе</button>
+          <button class="pill" onclick="setCalKindFilter('lessons', this)">📚 Только пары</button>
+          <button class="pill" onclick="setCalKindFilter('tasks', this)">⏰ Только дедлайны</button>
+        </div>
+
+        <div id="calendarGrid" class="cal-grid"></div>
+
+        <div class="cal-legend">
+          <span>🟦 Синий — пары</span>
+          <span>🟥 Красный — активный дедлайн</span>
+          <span>🟨 Оранжевый — прошедший дедлайн</span>
+          <span>👆 Нажмите на любой день, чтобы увидеть детали</span>
+        </div>
+      </div>
+
+      <div id="calendarDayDetails" class="card"></div>
+    </section>
+
+    <!-- TAB 2: TASKS -->
+    <section id="tab-tasks" class="hidden">
+      <div class="toolbar">
+        <input type="text" id="taskSearch" placeholder="Поиск по описанию или предмету..." oninput="renderTasks()" />
+        <select id="taskSubjectFilter" onchange="renderTasks()">
+          <option value="">Все предметы</option>
+        </select>
+        <button class="btn primary admin-only hidden" onclick="openTaskModal()">➕ Новое задание</button>
+      </div>
+      <div class="pill-row">
+        <button class="pill active" onclick="setTaskFilter('active', this)">Актуальные</button>
+        <button class="pill" onclick="setTaskFilter('expired', this)">Прошедшие</button>
+        <button class="pill" onclick="setTaskFilter('all', this)">Все</button>
+      </div>
+      <div id="tasksContainer" class="grid"></div>
+    </section>
+
+    <!-- TAB 3: MATERIALS -->
+    <section id="tab-materials" class="hidden">
+      <div class="toolbar">
+        <input type="text" id="matSearch" placeholder="Поиск по текстам, названиям и ссылкам..." oninput="renderMaterials()" />
+        <select id="matSubjectFilter" onchange="renderMaterials()">
+          <option value="">Все предметы</option>
+        </select>
+        <button class="btn primary admin-only hidden" onclick="openMaterialModal()">➕ Добавить материал</button>
+      </div>
+      <div id="materialsContainer" class="grid"></div>
+    </section>
+
+    <!-- TAB 4: ADMIN -->
+    <section id="tab-admin" class="hidden">
+      <div class="grid">
+        <div class="card">
+          <div class="section-title"><span>📥 Загрузка расписания (.csv)</span></div>
+          <p class="muted-text" style="margin-bottom: 10px;">
+            Загрузите выгруженный из таблицы CSV-файл (поддерживается формат университета и простой CSV).
+          </p>
+          <div class="form-group">
+            <label>Модуль по умолчанию (если не указан в файле)</label>
+            <select id="csvDefaultModule">
+              <option value="2">2 модуль</option>
+              <option value="3">3 модуль</option>
+              <option value="4">4 модуль</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <input type="file" id="csvFileInput" accept=".csv,text/csv" />
+          </div>
+          <div class="form-group">
+            <label>Или вставьте текст CSV сюда:</label>
+            <textarea id="csvTextInput" placeholder="Вставьте содержимое CSV..."></textarea>
+          </div>
+          <button class="btn primary" onclick="previewCsv()">👀 Предпросмотр расписания</button>
+          <div id="csvPreviewBox" class="hidden" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+            <p id="csvPreviewStats" style="font-weight: 600; margin-bottom: 8px;"></p>
+            <div class="form-group">
+              <label>Режим импорта</label>
+              <select id="csvImportMode">
+                <option value="add_missing">Добавить недостающие и обновить пересечения</option>
+                <option value="replace_module">Перезаписать выбранный модуль полностью</option>
+              </select>
+            </div>
+            <div id="csvPreviewList" style="max-height: 220px; overflow-y: auto; font-size: 12px; margin-bottom: 10px;"></div>
+            <button class="btn green" onclick="confirmCsvImport()">✅ Загрузить в базу данных</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-title"><span>📢 Важное объявление в канал</span></div>
+          <div class="form-group">
+            <textarea id="broadcastText" placeholder="Введите текст объявления для группы..."></textarea>
+          </div>
+          <label class="checkbox-row" style="margin-bottom: 12px;">
+            <input type="checkbox" id="broadcastPin" /> Закрепить сообщение в канале
+          </label>
+          <button class="btn primary" onclick="sendBroadcast()">📤 Отправить в канал</button>
+
+          <hr style="border:none; border-top:1px solid var(--border); margin: 18px 0;" />
+
+          <div class="section-title"><span>📌 Закреплённый пост и Supabase</span></div>
+          <button class="btn" onclick="refreshPinnedPost()" style="margin-bottom: 14px;">🔄 Обновить закреплённый пост сейчас</button>
+          <div class="muted-text">Использовано места в базе Supabase: <strong id="dbUsageLabel">0 МБ</strong> / 500 МБ</div>
+          <div class="progress-bg"><div id="dbUsageBar" class="progress-fill" style="width: 0%;"></div></div>
+
+          <hr style="border:none; border-top:1px solid var(--border); margin: 18px 0;" />
+
+          <div class="section-title"><span>🔐 Доступ в браузере</span></div>
+          <p class="muted-text" style="margin-bottom: 8px;">Ссылка на CRM: <code id="crmUrlCode">/crm</code></p>
+          <div class="form-group">
+            <label>Пароль для группы (пусто = открытый вход для всех на просмотр)</label>
+            <input type="text" id="studentPasswordInput" placeholder="Пусто = свободный вход для всех" />
+          </div>
+          <div class="form-group">
+            <label>Новый пароль старосты (оставьте пустым, чтобы не менять)</label>
+            <input type="password" id="adminPasswordInput" placeholder="По умолчанию: 340568" />
+          </div>
+          <button class="btn" onclick="savePasswords()">💾 Сохранить пароли</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- MODAL: TASK CREATE / EDIT -->
+<div id="taskModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="taskModalTitle">Новое задание</span>
+      <button class="btn sm" onclick="closeModal('taskModal')">✕</button>
+    </div>
+    <input type="hidden" id="taskEditId" />
+    <div class="form-group">
+      <label>Предмет</label>
+      <select id="taskSubjectSelect" onchange="toggleCustomSubject('taskSubjectSelect', 'taskSubjectCustom')"></select>
+      <input type="text" id="taskSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Введите название нового предмета..." />
+    </div>
+    <div class="form-group">
+      <label>Описание (что нужно сделать)</label>
+      <textarea id="taskDesc" placeholder="Например: выполнить тест и прислать отчёт..."></textarea>
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Дедлайн</label>
+        <input type="datetime-local" id="taskDeadline" />
+      </div>
+      <div class="form-group">
+        <label>Куда сдавать (ссылка / почта / текст)</label>
+        <input type="text" id="taskSubmitUrl" placeholder="Почта, форма или 'Уточняется'" />
+      </div>
+    </div>
+
+    <div id="taskExistingFilesWrap" class="form-group hidden">
+      <label>Уже прикреплённые файлы</label>
+      <div id="taskExistingFilesList" class="files-list"></div>
+    </div>
+
+    <div class="form-group">
+      <label id="taskFilesLabel">Прикрепить файлы (можно несколько штук сразу)</label>
+      <div class="dropzone" id="taskDropzone" onclick="document.getElementById('taskFilesInput').click()">
+        📎 Нажмите или перетащите файлы сюда (PDF, Word, фото, таблицы...)
+        <input type="file" id="taskFilesInput" multiple class="hidden" onchange="onSelectFiles('task', this.files)" />
+      </div>
+      <div id="taskPendingFiles" class="files-list"></div>
+    </div>
+
+    <label id="taskPublishRow" class="checkbox-row" style="margin-bottom: 14px;">
+      <input type="checkbox" id="taskPublishCheck" checked /> <span id="taskPublishLabel">Опубликовать в Telegram-канал и обновить закреп</span>
+    </label>
+
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="closeModal('taskModal')">Отмена</button>
+      <button class="btn primary" id="taskSaveBtn" onclick="saveTask()">💾 Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: LESSON CREATE / EDIT -->
+<div id="lessonModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="lessonModalTitle">Добавить пару</span>
+      <button class="btn sm" onclick="closeModal('lessonModal')">✕</button>
+    </div>
+    <input type="hidden" id="lessonEditId" />
+    <div class="row-2">
+      <div class="form-group">
+        <label>Дата</label>
+        <input type="date" id="lessonDate" />
+      </div>
+      <div class="form-group">
+        <label>Модуль</label>
+        <select id="lessonModule">
+          <option value="1">1 модуль</option>
+          <option value="2" selected>2 модуль</option>
+          <option value="3">3 модуль</option>
+          <option value="4">4 модуль</option>
+        </select>
+      </div>
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Начало (ЧЧ:ММ)</label>
+        <input type="time" id="lessonStart" />
+      </div>
+      <div class="form-group">
+        <label>Конец (ЧЧ:ММ)</label>
+        <input type="time" id="lessonEnd" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Предмет</label>
+      <select id="lessonSubjectSelect" onchange="toggleCustomSubject('lessonSubjectSelect', 'lessonSubjectCustom')"></select>
+      <input type="text" id="lessonSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Название предмета..." />
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label>Тип</label>
+        <select id="lessonKind">
+          <option value="Лекция">Лекция</option>
+          <option value="Семинар">Семинар</option>
+          <option value="Практика">Практика</option>
+          <option value="Экзамен">Экзамен</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Преподаватель</label>
+        <input type="text" id="lessonTeacher" placeholder="ФИО преподавателя" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Ссылка на Телемост</label>
+      <input type="url" id="lessonUrl" placeholder="https://telemost.360.yandex.ru/j/..." />
+    </div>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="closeModal('lessonModal')">Отмена</button>
+      <button class="btn primary" onclick="saveLesson()">💾 Сохранить пару</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: MATERIAL CREATE / EDIT -->
+<div id="materialModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="matModalTitle">Добавить материал</span>
+      <button class="btn sm" onclick="closeModal('materialModal')">✕</button>
+    </div>
+    <input type="hidden" id="matEditId" />
+    <div class="form-group">
+      <label>Предмет / Раздел</label>
+      <select id="matSubjectSelect" onchange="toggleCustomSubject('matSubjectSelect', 'matSubjectCustom')"></select>
+      <input type="text" id="matSubjectCustom" class="hidden" style="margin-top:6px;" placeholder="Название предмета или раздела..." />
+    </div>
+    <div class="form-group">
+      <label>Заголовок</label>
+      <input type="text" id="matTitle" placeholder="Например: Конспект лекции №3 / Шаблон отчёта" />
+    </div>
+    <div class="form-group">
+      <label>Текст / Заметка / Инструкция</label>
+      <textarea id="matContent" style="min-height: 130px;" placeholder="Любые полезные тексты, вопросы, почта преподавателя..."></textarea>
+    </div>
+    <div class="form-group">
+      <label>Внешняя ссылка (необязательно)</label>
+      <input type="url" id="matUrl" placeholder="https://docs.google.com/..." />
+    </div>
+    <div id="matExistingFilesWrap" class="form-group hidden">
+      <label>Прикреплённые файлы</label>
+      <div id="matExistingFilesList" class="files-list"></div>
+    </div>
+    <div class="form-group">
+      <label>Прикрепить файлы (можно несколько)</label>
+      <div class="dropzone" id="matDropzone" onclick="document.getElementById('matFilesInput').click()">
+        📎 Нажмите или перетащите файлы сюда
+        <input type="file" id="matFilesInput" multiple class="hidden" onchange="onSelectFiles('mat', this.files)" />
+      </div>
+      <div id="matPendingFiles" class="files-list"></div>
+    </div>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn" onclick="closeModal('materialModal')">Отмена</button>
+      <button class="btn primary" id="matSaveBtn" onclick="saveMaterial()">💾 Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: READ FULL MATERIAL -->
+<div id="readMaterialModal" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title">
+      <span id="readMatTitle">Материал</span>
+      <button class="btn sm" onclick="closeModal('readMaterialModal')">✕</button>
+    </div>
+    <div style="margin-bottom:10px;"><span id="readMatSubj" class="badge"></span></div>
+    <div id="readMatBody" class="pre-text" style="background: var(--surface-2); padding: 12px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 12px;"></div>
+    <div id="readMatLinkWrap" style="margin-bottom: 12px;"></div>
+    <div id="readMatFiles" class="files-list"></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top: 14px;">
+      <button class="btn" onclick="copyMaterialText()">📋 Скопировать текст</button>
+      <button class="btn primary" onclick="closeModal('readMaterialModal')">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    if (tg.colorScheme === 'dark') document.documentElement.classList.add('dark');
+  } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.documentElement.classList.add('dark');
+  }
+
+  let STATE = {
+    auth: { authenticated: false, role: 'guest', user_id: 0, dl_token: '' },
+    today: '',
+    subjects: [],
+    schedule: [],
+    tasks: [],
+    materials: [],
+    schedFilter: 'upcoming',
+    taskFilter: 'active',
+    calYear: null,
+    calMonth: null,
+    selectedCalDate: '',
+    calKindFilter: 'all',
+    pendingTaskFiles: [],
+    pendingMatFiles: [],
+    csvPreviewLessons: [],
+    currentReadText: ''
+  };
+
+  function esc(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function showToast(msg, duration = 2600) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), duration);
+  }
+
+  function toggleTheme() {
+    document.documentElement.classList.toggle('dark');
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return '0 Б';
+    if (bytes < 1024) return bytes + ' Б';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' КБ';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' МБ';
+  }
+
+  function formatDateRu(isoDate) {
+    if (!isoDate) return '';
+    const [y, m, d] = isoDate.split('-');
+    const dateObj = new Date(Number(y), Number(m) - 1, Number(d));
+    const weekdays = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+    return `${d}.${m}.${y} (${weekdays[dateObj.getDay()]})`;
+  }
+
+  function apiHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (tg && tg.initData) {
+      headers['X-Telegram-Init-Data'] = tg.initData;
+    }
+    return headers;
+  }
+
+  async function apiFetch(url, options = {}) {
+    options.headers = apiHeaders(options.headers || {});
+    const res = await fetch(url, options);
+    let data = {};
+    const ctype = res.headers.get('Content-Type') || '';
+    if (ctype.includes('application/json')) {
+      data = await res.json();
+    }
+    if (!res.ok) {
+      throw new Error(data.error || `Ошибка сервера (${res.status})`);
+    }
+    return data;
+  }
+
+  async function initApp() {
+    try {
+      if (tg && tg.initData) {
+        await apiFetch('/api/auth/tg-session', { method: 'POST' });
+      }
+      await loadBootstrap();
+    } catch (e) {
+      document.getElementById('loginView').classList.remove('hidden');
+      document.getElementById('appView').classList.add('hidden');
+    }
+  }
+
+  function openAdminLogin() {
+    document.getElementById('loginErr').textContent = '';
+    document.getElementById('loginPass').value = '';
+    document.getElementById('backToAppBtn').classList.remove('hidden');
+    document.getElementById('loginView').classList.remove('hidden');
+    document.getElementById('appView').classList.add('hidden');
+    setTimeout(() => document.getElementById('loginPass').focus(), 50);
+  }
+
+  function closeLoginView() {
+    document.getElementById('loginErr').textContent = '';
+    document.getElementById('loginPass').value = '';
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+  }
+
+  async function doLogin() {
+    const pw = document.getElementById('loginPass').value;
+    const errEl = document.getElementById('loginErr');
+    errEl.textContent = '';
+    try {
+      await apiFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+      await loadBootstrap();
+    } catch (e) {
+      errEl.textContent = e.message;
+    }
+  }
+
+  async function doLogout() {
+    await apiFetch('/api/auth/logout', { method: 'POST' });
+    location.reload();
+  }
+
+  async function loadBootstrap() {
+    const data = await apiFetch('/api/bootstrap');
+    STATE.auth = data.auth;
+    STATE.today = data.today;
+    STATE.subjects = data.subjects;
+    STATE.schedule = data.schedule;
+    STATE.tasks = data.tasks;
+    STATE.materials = data.materials;
+
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+
+    const isAdmin = STATE.auth.role === 'admin';
+    const badge = document.getElementById('roleBadge');
+    badge.textContent = isAdmin ? '👑 Староста (Админ)' : '🎓 Просмотр';
+    badge.className = isAdmin ? 'badge green' : 'badge';
+
+    document.querySelectorAll('.admin-only').forEach(el => {
+      el.classList.toggle('hidden', !isAdmin);
+    });
+    document.getElementById('adminTabBtn').classList.toggle('hidden', !isAdmin);
+    document.getElementById('adminLoginBtn').classList.toggle('hidden', isAdmin);
+    document.getElementById('logoutBtn').classList.toggle('hidden', STATE.auth.method === 'telegram' || STATE.auth.method === 'public');
+
+    if (isAdmin && data.admin_info) {
+      document.getElementById('studentPasswordInput').value = data.admin_info.student_password || '';
+      document.getElementById('crmUrlCode').textContent = data.admin_info.crm_url || '/crm';
+    }
+    const usedMb = data.db_size_mb || 0;
+    document.getElementById('dbUsageLabel').textContent = `${usedMb} МБ`;
+    document.getElementById('dbUsageBar').style.width = `${Math.min(100, (usedMb / 500) * 100)}%`;
+
+    document.getElementById('todayStr').textContent = formatDateRu(STATE.today);
+    if (!STATE.selectedCalDate && STATE.today) {
+      const [ty, tm] = STATE.today.split('-').map(Number);
+      STATE.calYear = ty;
+      STATE.calMonth = tm - 1;
+      STATE.selectedCalDate = STATE.today;
+    }
+
+    populateSubjectSelects();
+    renderSchedule();
+    renderCalendar();
+    renderTasks();
+    renderMaterials();
+  }
+
+  function populateSubjectSelects() {
+    const filterIds = ['schedSubjectFilter', 'calSubjectFilter', 'taskSubjectFilter', 'matSubjectFilter'];
+    filterIds.forEach(id => {
+      const sel = document.getElementById(id);
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">Все предметы</option>' +
+        STATE.subjects.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      sel.value = prev;
+    });
+
+    const modalIds = [
+      { id: 'taskSubjectSelect', allowGeneral: false },
+      { id: 'lessonSubjectSelect', allowGeneral: false },
+      { id: 'matSubjectSelect', allowGeneral: true }
+    ];
+    modalIds.forEach(({ id, allowGeneral }) => {
+      const sel = document.getElementById(id);
+      let opts = STATE.subjects.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      if (allowGeneral && !STATE.subjects.includes('Общее / Организационное')) {
+        opts = `<option value="Общее / Организационное">Общее / Организационное</option>` + opts;
+      }
+      opts += `<option value="__custom__">✍️ Ввести свой предмет...</option>`;
+      sel.innerHTML = opts;
+    });
+  }
+
+  function toggleCustomSubject(selectId, customInputId) {
+    const val = document.getElementById(selectId).value;
+    document.getElementById(customInputId).classList.toggle('hidden', val !== '__custom__');
+  }
+
+  function getSelectedSubject(selectId, customInputId) {
+    const val = document.getElementById(selectId).value;
+    if (val === '__custom__') return document.getElementById(customInputId).value.trim();
+    return val;
+  }
+
+  function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+    ['schedule', 'calendar', 'tasks', 'materials', 'admin'].forEach(t => {
+      document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tabName);
+    });
+    if (tabName === 'calendar') renderCalendar();
+  }
+
+  function setSchedFilter(mode, btn) {
+    STATE.schedFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderSchedule();
+  }
+
+  function setTaskFilter(mode, btn) {
+    STATE.taskFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderTasks();
+  }
+
+  function setCalKindFilter(mode, btn) {
+    STATE.calKindFilter = mode;
+    btn.parentElement.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    renderCalendar();
+  }
+
+  function changeCalMonth(delta) {
+    if (STATE.calYear === null || STATE.calMonth === null) return;
+    const d = new Date(STATE.calYear, STATE.calMonth + delta, 1);
+    STATE.calYear = d.getFullYear();
+    STATE.calMonth = d.getMonth();
+    renderCalendar();
+  }
+
+  function jumpCalToday() {
+    if (!STATE.today) return;
+    const [y, m] = STATE.today.split('-').map(Number);
+    STATE.calYear = y;
+    STATE.calMonth = m - 1;
+    STATE.selectedCalDate = STATE.today;
+    renderCalendar();
+  }
+
+  function selectCalDate(isoDate) {
+    STATE.selectedCalDate = isoDate;
+    const [y, m] = isoDate.split('-').map(Number);
+    if (y !== STATE.calYear || (m - 1) !== STATE.calMonth) {
+      STATE.calYear = y;
+      STATE.calMonth = m - 1;
+    }
+    renderCalendar();
+  }
+
+  function _toIsoDate(y, mZero, d) {
+    return `${y}-${String(mZero + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  function renderCalendar() {
+    const gridEl = document.getElementById('calendarGrid');
+    const titleEl = document.getElementById('calMonthTitle');
+    if (!gridEl || !titleEl) return;
+
+    if (STATE.calYear === null || STATE.calMonth === null) {
+      const ref = STATE.today ? new Date(STATE.today + 'T12:00:00') : new Date();
+      STATE.calYear = ref.getFullYear();
+      STATE.calMonth = ref.getMonth();
+      if (!STATE.selectedCalDate && STATE.today) STATE.selectedCalDate = STATE.today;
+    }
+
+    const monthNames = [
+      'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+      'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'
+    ];
+    titleEl.textContent = `${monthNames[STATE.calMonth]} ${STATE.calYear}`;
+
+    const subjFilter = document.getElementById('calSubjectFilter')?.value || '';
+    const showLessons = STATE.calKindFilter !== 'tasks';
+    const showTasks = STATE.calKindFilter !== 'lessons';
+    const now = new Date();
+
+    const lessonsByDate = {};
+    if (showLessons) {
+      STATE.schedule.forEach(l => {
+        if (subjFilter && l.subject !== subjFilter) return;
+        (lessonsByDate[l.lesson_date] = lessonsByDate[l.lesson_date] || []).push(l);
+      });
+    }
+
+    const tasksByDate = {};
+    if (showTasks) {
+      STATE.tasks.forEach(t => {
+        if (subjFilter && t.subject !== subjFilter) return;
+        const dtPart = (t.deadline || '').split(' ')[0];
+        if (!dtPart) return;
+        (tasksByDate[dtPart] = tasksByDate[dtPart] || []).push(t);
+      });
+    }
+
+    const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    let html = weekdays.map((w, idx) =>
+      `<div class="cal-weekday ${idx >= 5 ? 'weekend' : ''}">${w}</div>`
+    ).join('');
+
+    const firstDay = new Date(STATE.calYear, STATE.calMonth, 1);
+    const startOffset = (firstDay.getDay() + 6) % 7; // 0 = Пн ... 6 = Вс
+    const daysInMonth = new Date(STATE.calYear, STATE.calMonth + 1, 0).getDate();
+    const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
+
+    for (let i = 0; i < totalCells; i++) {
+      const cellDate = new Date(STATE.calYear, STATE.calMonth, 1 - startOffset + i);
+      const iso = _toIsoDate(cellDate.getFullYear(), cellDate.getMonth(), cellDate.getDate());
+      const inMonth = cellDate.getMonth() === STATE.calMonth;
+      const isWeekend = (i % 7) >= 5;
+      const isToday = iso === STATE.today;
+      const isSelected = iso === STATE.selectedCalDate;
+
+      const dayLessons = lessonsByDate[iso] || [];
+      const dayTasks = tasksByDate[iso] || [];
+
+      const classes = ['cal-cell'];
+      if (!inMonth) classes.push('is-other-month');
+      if (isWeekend) classes.push('is-weekend');
+      if (isToday) classes.push('is-today');
+      if (isSelected) classes.push('is-selected');
+
+      // Десктопные плашки (до 3 штук)
+      const chips = [];
+      dayLessons.forEach(l => {
+        chips.push(`<div class="cal-chip lesson" title="${esc(l.start_time)} ${esc(l.subject)}">${esc(l.start_time)} ${esc(l.subject)}</div>`);
+      });
+      dayTasks.forEach(t => {
+        const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+        const cls = deadDt < now ? 'deadline-old' : 'deadline';
+        const hm = (t.deadline.split(' ')[1] || '').trim();
+        chips.push(`<div class="cal-chip ${cls}" title="Дедлайн: ${esc(t.subject)} — ${esc(t.description)}">⏰ ${esc(hm)} ${esc(t.subject)}</div>`);
+      });
+      const shownChips = chips.slice(0, 3).join('');
+      const moreCount = chips.length > 3 ? `<div class="cal-more">+ ещё ${chips.length - 3}</div>` : '';
+
+      // Компактные счётчики для узких экранов
+      const dots = [];
+      if (dayLessons.length > 0) dots.push(`<span class="cal-dot-pill lesson">${dayLessons.length}п</span>`);
+      if (dayTasks.length > 0) {
+        const hasActiveTask = dayTasks.some(t => new Date(t.deadline.replace(' ', 'T') + ':00') >= now);
+        dots.push(`<span class="cal-dot-pill ${hasActiveTask ? 'deadline' : 'deadline-old'}">⏰${dayTasks.length}</span>`);
+      }
+
+      html += `
+        <div class="${classes.join(' ')}" onclick="selectCalDate('${iso}')">
+          <div class="cal-cell-top">
+            <span class="cal-day-num">${cellDate.getDate()}</span>
+          </div>
+          <div class="cal-chips">${shownChips}${moreCount}</div>
+          <div class="cal-dots">${dots.join('')}</div>
+        </div>
+      `;
+    }
+
+    gridEl.innerHTML = html;
+    renderCalendarDayDetails(subjFilter, showLessons, showTasks);
+  }
+
+  function renderCalendarDayDetails(subjFilter, showLessons, showTasks) {
+    const el = document.getElementById('calendarDayDetails');
+    if (!el) return;
+    const iso = STATE.selectedCalDate || STATE.today;
+    if (!iso) {
+      el.innerHTML = '<p class="muted-text">Выберите день в календаре.</p>';
+      return;
+    }
+
+    const isAdmin = STATE.auth.role === 'admin';
+    const now = new Date();
+    const lessons = showLessons
+      ? STATE.schedule.filter(l => l.lesson_date === iso && (!subjFilter || l.subject === subjFilter))
+      : [];
+    const tasks = showTasks
+      ? STATE.tasks.filter(t => (t.deadline || '').startsWith(iso) && (!subjFilter || t.subject === subjFilter))
+      : [];
+
+    let bodyHtml = '';
+    if (showLessons) {
+      bodyHtml += `<div style="margin-bottom:14px;">
+        <div style="font-size:14px; font-weight:700; margin-bottom:8px;">📚 Пары (${lessons.length})</div>
+        ${lessons.length ? lessons.map(l => renderLessonHtml(l, true)).join('') : '<p class="muted-text">В этот день пар нет.</p>'}
+      </div>`;
+    }
+    if (showTasks) {
+      bodyHtml += `<div>
+        <div style="font-size:14px; font-weight:700; margin-bottom:8px;">📌 Дедлайны (${tasks.length})</div>
+        ${tasks.length ? `<div class="grid">${tasks.map(t => renderTaskCardHtml(t, now)).join('')}</div>` : '<p class="muted-text">На этот день дедлайнов нет.</p>'}
+      </div>`;
+    }
+
+    el.innerHTML = `
+      <div class="section-title">
+        <span>📅 ${formatDateRu(iso)} ${iso === STATE.today ? '<span class="badge green">Сегодня</span>' : ''}</span>
+        ${isAdmin ? `
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="btn sm primary" onclick="openLessonModal(null, '${iso}')">➕ Пара</button>
+            <button class="btn sm" onclick="openTaskModal(null, '${iso}')">➕ Дедлайн</button>
+          </div>` : ''}
+      </div>
+      ${bodyHtml}
+    `;
+  }
+
+  function renderSchedule() {
+    const todayLessons = STATE.schedule.filter(l => l.lesson_date === STATE.today);
+    document.getElementById('todayCount').textContent = todayLessons.length;
+    const todayEl = document.getElementById('todayLessonsContainer');
+
+    if (todayLessons.length === 0) {
+      todayEl.innerHTML = '<p class="muted-text">🎉 Сегодня пар нет! Можно заняться дедлайнами или отдохнуть.</p>';
+    } else {
+      todayEl.innerHTML = todayLessons.map(l => renderLessonHtml(l, false)).join('');
+    }
+
+    // Уникальные ссылки на Телемост по предметам
+    const telemostMap = new Map();
+    STATE.schedule.forEach(l => {
+      if (l.url && l.url.includes('telemost') && l.url !== 'https://telemost.yandex.ru') {
+        if (!telemostMap.has(l.subject)) telemostMap.set(l.subject, l.url);
+      }
+    });
+    const tmEl = document.getElementById('telemostLinksContainer');
+    if (telemostMap.size === 0) {
+      tmEl.innerHTML = '<span class="muted-text">Ссылки появятся после загрузки расписания.</span>';
+    } else {
+      tmEl.innerHTML = Array.from(telemostMap.entries()).map(([subj, url]) =>
+        `<a class="btn sm green" href="${esc(url)}" target="_blank">🎥 ${esc(subj.length > 42 ? subj.slice(0, 40) + '…' : subj)}</a>`
+      ).join('');
+    }
+
+    // Полный список расписания с фильтрами
+    const search = document.getElementById('schedSearch').value.toLowerCase();
+    const subjFilter = document.getElementById('schedSubjectFilter').value;
+
+    const filtered = STATE.schedule.filter(l => {
+      if (STATE.schedFilter === 'upcoming' && l.lesson_date < STATE.today) return false;
+      if (STATE.schedFilter === 'm2' && Number(l.module) !== 2) return false;
+      if (STATE.schedFilter === 'm3' && Number(l.module) !== 3) return false;
+      if (STATE.schedFilter === 'm4' && Number(l.module) !== 4) return false;
+      if (subjFilter && l.subject !== subjFilter) return false;
+      if (search && !(`${l.subject} ${l.teacher} ${l.kind}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    const listEl = document.getElementById('scheduleListContainer');
+    if (filtered.length === 0) {
+      listEl.innerHTML = '<p class="muted-text">Ничего не найдено.</p>';
+      return;
+    }
+
+    // Группировка по дате
+    const byDate = {};
+    filtered.forEach(l => {
+      (byDate[l.lesson_date] = byDate[l.lesson_date] || []).push(l);
+    });
+
+    listEl.innerHTML = Object.keys(byDate).map(dt => `
+      <div style="margin-bottom: 14px;">
+        <div style="font-weight:700; font-size:14px; margin-bottom:6px; color: var(--muted);">
+          📅 ${formatDateRu(dt)} ${dt === STATE.today ? '<span class="badge green">Сегодня</span>' : ''}
+        </div>
+        ${byDate[dt].map(l => renderLessonHtml(l, true)).join('')}
+      </div>
+    `).join('');
+  }
+
+  function renderLessonHtml(l, showAdminBtns) {
+    const isAdmin = STATE.auth.role === 'admin' && showAdminBtns;
+    const hasSpecificUrl = l.url && l.url.startsWith('http');
+    return `
+      <div class="lesson-row">
+        <div class="lesson-time">${esc(l.start_time)} – ${esc(l.end_time)}</div>
+        <div class="lesson-info">
+          <div class="lesson-subj">${esc(l.subject)}</div>
+          <div class="lesson-meta">
+            <span class="badge muted">${esc(l.kind)}</span>
+            ${l.teacher ? `<span>👨‍🏫 ${esc(l.teacher)}</span>` : ''}
+          </div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          ${hasSpecificUrl ? `<a class="btn sm green" href="${esc(l.url)}" target="_blank">🎥 Телемост</a>` : ''}
+          ${isAdmin ? `<button class="btn sm" onclick="openLessonModal(${l.id})">✏️</button><button class="btn sm red" onclick="deleteLesson(${l.id})">🗑</button>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function fileDownloadUrl(kind, fid) {
+    const base = kind === 'task' ? `/api/task-files/${fid}` : `/api/material-files/${fid}`;
+    const tok = STATE.auth.dl_token ? `?dl=${encodeURIComponent(STATE.auth.dl_token)}` : '';
+    return base + tok;
+  }
+
+  function renderFilesHtml(kind, files) {
+    if (!files || !files.length) return '';
+    const inTg = Boolean(tg && tg.initData);
+    return `<div class="files-list">` + files.map(f => `
+      <div class="file-item">
+        <span class="file-name" title="${esc(f.file_name)}">📎 ${esc(f.file_name)} <span class="muted-text">(${formatBytes(f.file_size)})</span></span>
+        <div class="file-actions">
+          <a class="btn sm" href="${fileDownloadUrl(kind, f.id)}" download="${esc(f.file_name)}">⬇️</a>
+          ${inTg ? `<button class="btn sm primary" onclick="sendFileToMe('${kind}', ${f.id})">📩 В ЛС</button>` : ''}
+        </div>
+      </div>
+    `).join('') + `</div>`;
+  }
+
+  async function sendFileToMe(kind, fid) {
+    try {
+      await apiFetch(`/api/files/${kind}/${fid}/send-to-me`, { method: 'POST' });
+      showToast('Файл отправлен вам в личный чат с ботом!');
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  function formatSubmitLinkHtml(urlStr) {
+    const s = (urlStr || '').trim();
+    const httpMatch = s.match(/https?:\/\/\S+/);
+    if (httpMatch) {
+      const prefix = s.slice(0, httpMatch.index).trim();
+      return `${prefix ? esc(prefix) + ' ' : ''}<a href="${esc(httpMatch[0])}" target="_blank" style="color:var(--primary); font-weight:600;">🔗 Открыть ссылку</a>`;
+    }
+    const emailMatch = s.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (emailMatch) {
+      return `${esc(s)} (<a href="mailto:${esc(emailMatch[0])}" style="color:var(--primary);">Написать</a>)`;
+    }
+    return esc(s || 'Уточняется');
+  }
+
+  function renderTaskCardHtml(t, now = new Date()) {
+    const isAdmin = STATE.auth.role === 'admin';
+    const [datePart, timePart] = t.deadline.split(' ');
+    const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+    const isExpired = deadDt < now;
+    const diffHours = Math.round((deadDt - now) / 3600000);
+    let timeBadge = '';
+    if (isExpired) {
+      timeBadge = `<span class="badge red">Просрочен</span>`;
+    } else if (diffHours <= 24) {
+      timeBadge = `<span class="badge amber">Осталось ${Math.max(1, diffHours)} ч</span>`;
+    } else {
+      timeBadge = `<span class="badge green">Через ${Math.ceil(diffHours / 24)} дн.</span>`;
+    }
+
+    const draftBadge = (isAdmin && t.is_published === false)
+      ? `<span class="badge amber">📝 Черновик (не в канале)</span>` : '';
+
+    return `
+      <div class="card">
+        <div class="card-header">
+          <span class="badge">${esc(t.subject)}</span>
+          <span style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+            ${draftBadge}
+            ${timeBadge}
+          </span>
+        </div>
+        <div style="font-size:13px; font-weight:700; margin-bottom:6px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">
+          ⏰ Сдать до: ${formatDateRu(datePart)} ${esc(timePart || '')}
+        </div>
+        <div class="pre-text" style="margin-bottom:8px; ${isExpired ? 'text-decoration:line-through; color:var(--muted);' : ''}">${esc(t.description)}</div>
+        <div style="font-size:13px; color:var(--muted);">📥 Куда сдавать: ${formatSubmitLinkHtml(t.submit_url)}</div>
+        ${renderFilesHtml('task', t.files)}
+        ${isAdmin ? `
+          <div style="display:flex; gap:6px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); flex-wrap:wrap;">
+            <button class="btn sm" onclick="openTaskModal(${t.id})">✏️ Изменить / + Файлы</button>
+            <button class="btn sm red" onclick="deleteTask(${t.id})">🗑 Удалить</button>
+          </div>` : ''}
+      </div>
+    `;
+  }
+
+  function renderTasks() {
+    const now = new Date();
+    const search = document.getElementById('taskSearch').value.toLowerCase();
+    const subjFilter = document.getElementById('taskSubjectFilter').value;
+
+    const filtered = STATE.tasks.filter(t => {
+      const deadDt = new Date(t.deadline.replace(' ', 'T') + ':00');
+      const isExpired = deadDt < now;
+      if (STATE.taskFilter === 'active' && isExpired) return false;
+      if (STATE.taskFilter === 'expired' && !isExpired) return false;
+      if (subjFilter && t.subject !== subjFilter) return false;
+      if (search && !(`${t.subject} ${t.description} ${t.submit_url}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    const el = document.getElementById('tasksContainer');
+    if (filtered.length === 0) {
+      el.innerHTML = '<div class="card"><p class="muted-text">Заданий по выбранным фильтрам нет.</p></div>';
+      return;
+    }
+
+    el.innerHTML = filtered.map(t => renderTaskCardHtml(t, now)).join('');
+  }
+
+  function renderMaterials() {
+    const search = document.getElementById('matSearch').value.toLowerCase();
+    const subjFilter = document.getElementById('matSubjectFilter').value;
+    const isAdmin = STATE.auth.role === 'admin';
+
+    const filtered = STATE.materials.filter(m => {
+      if (subjFilter && m.subject !== subjFilter) return false;
+      if (search && !(`${m.subject} ${m.title} ${m.content_text} ${m.external_url}`.toLowerCase().includes(search))) return false;
+      return true;
+    });
+
+    const el = document.getElementById('materialsContainer');
+    if (filtered.length === 0) {
+      el.innerHTML = '<div class="card"><p class="muted-text">В базе знаний пока пусто. Староста может добавить тексты, методички и ссылки!</p></div>';
+      return;
+    }
+
+    el.innerHTML = filtered.map(m => {
+      const preview = m.content_text.length > 220 ? m.content_text.slice(0, 220) + '…' : m.content_text;
+      return `
+        <div class="card">
+          <div class="card-header">
+            <span class="badge">${esc(m.subject)}</span>
+            <span class="muted-text">${esc(m.created_at)}</span>
+          </div>
+          <h3 style="font-size:16px; margin-bottom:6px;">${esc(m.title)}</h3>
+          ${preview ? `<div class="pre-text muted-text" style="margin-bottom:8px;">${esc(preview)}</div>` : ''}
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
+            ${m.content_text ? `<button class="btn sm" onclick="openReadMaterial(${m.id})">📖 Читать полностью</button>` : ''}
+            ${m.external_url ? `<a class="btn sm" href="${esc(m.external_url)}" target="_blank">🔗 Открыть ссылку</a>` : ''}
+          </div>
+          ${renderFilesHtml('material', m.files)}
+          ${isAdmin ? `
+            <div style="display:flex; gap:6px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
+              <button class="btn sm" onclick="openMaterialModal(${m.id})">✏️ Изменить / + Файлы</button>
+              <button class="btn sm red" onclick="deleteMaterial(${m.id})">🗑 Удалить</button>
+            </div>` : ''}
+        </div>
+      `;
+    }).join('');
+  }
+
+  function openReadMaterial(id) {
+    const m = STATE.materials.find(x => x.id === id);
+    if (!m) return;
+    STATE.currentReadText = m.content_text || '';
+    document.getElementById('readMatTitle').textContent = m.title;
+    document.getElementById('readMatSubj').textContent = m.subject;
+    document.getElementById('readMatBody').textContent = m.content_text || 'Текст отсутствует';
+    document.getElementById('readMatLinkWrap').innerHTML = m.external_url
+      ? `<a class="btn sm primary" href="${esc(m.external_url)}" target="_blank">🔗 Перейти по ссылке</a>` : '';
+    document.getElementById('readMatFiles').innerHTML = renderFilesHtml('material', m.files);
+    openModal('readMaterialModal');
+  }
+
+  function copyMaterialText() {
+    navigator.clipboard.writeText(STATE.currentReadText).then(() => showToast('Текст скопирован!'));
+  }
+
+  // --- MODALS & FILE PICKERS ---
+  function openModal(id) { document.getElementById(id).classList.add('open'); }
+  function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+  function setupDropzone(dropId, kind) {
+    const dz = document.getElementById(dropId);
+    dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); };
+    dz.ondragleave = () => dz.classList.remove('dragover');
+    dz.ondrop = e => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      onSelectFiles(kind, e.dataTransfer.files);
+    };
+  }
+  setupDropzone('taskDropzone', 'task');
+  setupDropzone('matDropzone', 'mat');
+
+  function onSelectFiles(kind, fileList) {
+    const arr = Array.from(fileList || []);
+    if (kind === 'task') {
+      STATE.pendingTaskFiles.push(...arr);
+      renderPendingFiles('task');
+    } else {
+      STATE.pendingMatFiles.push(...arr);
+      renderPendingFiles('mat');
+    }
+  }
+
+  function removePendingFile(kind, idx) {
+    if (kind === 'task') {
+      STATE.pendingTaskFiles.splice(idx, 1);
+      renderPendingFiles('task');
+    } else {
+      STATE.pendingMatFiles.splice(idx, 1);
+      renderPendingFiles('mat');
+    }
+  }
+
+  function renderPendingFiles(kind) {
+    const files = kind === 'task' ? STATE.pendingTaskFiles : STATE.pendingMatFiles;
+    const container = document.getElementById(kind === 'task' ? 'taskPendingFiles' : 'matPendingFiles');
+    container.innerHTML = files.map((f, idx) => `
+      <div class="file-item">
+        <span class="file-name">🆕 ${esc(f.name)} (${formatBytes(f.size)})</span>
+        <button class="btn sm red" onclick="removePendingFile('${kind}', ${idx})">✕</button>
+      </div>
+    `).join('');
+  }
+
+  // --- TASK CRUD ---
+  function openTaskModal(taskId = null, presetDate = null) {
+    STATE.pendingTaskFiles = [];
+    document.getElementById('taskFilesInput').value = '';
+    renderPendingFiles('task');
+
+    const editIdEl = document.getElementById('taskEditId');
+    const existingWrap = document.getElementById('taskExistingFilesWrap');
+    const existingList = document.getElementById('taskExistingFilesList');
+
+    if (taskId) {
+      const t = STATE.tasks.find(x => x.id === taskId);
+      if (!t) return;
+      document.getElementById('taskModalTitle').textContent = 'Редактировать задание';
+      editIdEl.value = t.id;
+      const sel = document.getElementById('taskSubjectSelect');
+      if (Array.from(sel.options).some(o => o.value === t.subject)) {
+        sel.value = t.subject;
+        document.getElementById('taskSubjectCustom').classList.add('hidden');
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('taskSubjectCustom').classList.remove('hidden');
+        document.getElementById('taskSubjectCustom').value = t.subject;
+      }
+      document.getElementById('taskDesc').value = t.description;
+      document.getElementById('taskDeadline').value = t.deadline.replace(' ', 'T');
+      document.getElementById('taskSubmitUrl').value = t.submit_url;
+      document.getElementById('taskFilesLabel').textContent = 'Добавить ещё файлы к этому заданию';
+      if (t.is_published === false) {
+        document.getElementById('taskPublishLabel').textContent = 'Опубликовать черновик в Telegram-канал и обновить закреп';
+        document.getElementById('taskPublishCheck').checked = false;
+      } else {
+        document.getElementById('taskPublishLabel').textContent = 'Отправить уведомление об изменении в канал';
+        document.getElementById('taskPublishCheck').checked = true;
+      }
+
+      if (t.files && t.files.length) {
+        existingWrap.classList.remove('hidden');
+        existingList.innerHTML = t.files.map(f => `
+          <div class="file-item" id="tf-row-${f.id}">
+            <span class="file-name">📎 ${esc(f.file_name)} (${formatBytes(f.file_size)})</span>
+            <button class="btn sm red" onclick="deleteTaskFile(${t.id}, ${f.id})">✕ Удалить</button>
+          </div>
+        `).join('');
+      } else {
+        existingWrap.classList.add('hidden');
+      }
+    } else {
+      document.getElementById('taskModalTitle').textContent = 'Новое задание';
+      editIdEl.value = '';
+      document.getElementById('taskDesc').value = '';
+      document.getElementById('taskDeadline').value = `${presetDate || STATE.today}T18:10`;
+      document.getElementById('taskSubmitUrl').value = '';
+      document.getElementById('taskFilesLabel').textContent = 'Прикрепить файлы (можно несколько штук сразу)';
+      document.getElementById('taskPublishLabel').textContent = 'Опубликовать в канал и закреп (снимите для тихого черновика)';
+      document.getElementById('taskPublishCheck').checked = true;
+      existingWrap.classList.add('hidden');
+    }
+    openModal('taskModal');
+  }
+
+  async function deleteTaskFile(taskId, fid) {
+    if (!confirm('Удалить этот файл из задания?')) return;
+    try {
+      await apiFetch(`/api/tasks/${taskId}/files/${fid}`, { method: 'DELETE' });
+      const row = document.getElementById(`tf-row-${fid}`);
+      if (row) row.remove();
+      showToast('Файл удалён');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function saveTask() {
+    const id = document.getElementById('taskEditId').value;
+    const subject = getSelectedSubject('taskSubjectSelect', 'taskSubjectCustom');
+    const description = document.getElementById('taskDesc').value.trim();
+    const deadline = document.getElementById('taskDeadline').value.trim();
+    const submit_url = document.getElementById('taskSubmitUrl').value.trim();
+    const publish = document.getElementById('taskPublishCheck').checked;
+
+    if (!subject || !description || !deadline) {
+      showToast('Заполните предмет, описание и дедлайн!', 3000);
+      return;
+    }
+
+    const btn = document.getElementById('taskSaveBtn');
+    btn.disabled = true;
+    try {
+      if (!id) {
+        const fd = new FormData();
+        fd.append('subject', subject);
+        fd.append('description', description);
+        fd.append('deadline', deadline);
+        fd.append('submit_url', submit_url);
+        fd.append('publish', publish ? 'true' : 'false');
+        STATE.pendingTaskFiles.forEach(f => fd.append('files', f));
+        await apiFetch('/api/tasks', { method: 'POST', body: fd });
+        showToast('Задание добавлено!');
+      } else {
+        await apiFetch(`/api/tasks/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject, description, deadline, submit_url, notify_channel: publish })
+        });
+        if (STATE.pendingTaskFiles.length > 0) {
+          const fd = new FormData();
+          fd.append('sync_channel', publish ? 'true' : 'false');
+          STATE.pendingTaskFiles.forEach(f => fd.append('files', f));
+          await apiFetch(`/api/tasks/${id}/files`, { method: 'POST', body: fd });
+        }
+        showToast('Задание обновлено!');
+      }
+      closeModal('taskModal');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteTask(id) {
+    if (!confirm('Удалить задание? Бот также сотрёт пост в канале и обновит закреп.')) return;
+    try {
+      await apiFetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      showToast('Задание удалено');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- LESSON CRUD ---
+  function openLessonModal(lid = null, presetDate = null) {
+    document.getElementById('lessonEditId').value = lid || '';
+    if (lid) {
+      const l = STATE.schedule.find(x => x.id === lid);
+      if (!l) return;
+      document.getElementById('lessonModalTitle').textContent = 'Редактировать пару';
+      document.getElementById('lessonDate').value = l.lesson_date;
+      document.getElementById('lessonModule').value = String(l.module || 2);
+      document.getElementById('lessonStart').value = l.start_time;
+      document.getElementById('lessonEnd').value = l.end_time;
+      const sel = document.getElementById('lessonSubjectSelect');
+      if (Array.from(sel.options).some(o => o.value === l.subject)) {
+        sel.value = l.subject;
+        document.getElementById('lessonSubjectCustom').classList.add('hidden');
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('lessonSubjectCustom').classList.remove('hidden');
+        document.getElementById('lessonSubjectCustom').value = l.subject;
+      }
+      document.getElementById('lessonKind').value = l.kind;
+      document.getElementById('lessonTeacher').value = l.teacher || '';
+      document.getElementById('lessonUrl').value = l.url || '';
+    } else {
+      document.getElementById('lessonModalTitle').textContent = 'Добавить пару';
+      document.getElementById('lessonDate').value = presetDate || STATE.today;
+      document.getElementById('lessonStart').value = '18:10';
+      document.getElementById('lessonEnd').value = '19:30';
+      document.getElementById('lessonTeacher').value = '';
+      document.getElementById('lessonUrl').value = 'https://telemost.360.yandex.ru/j/';
+    }
+    openModal('lessonModal');
+  }
+
+  async function saveLesson() {
+    const id = document.getElementById('lessonEditId').value;
+    const payload = {
+      lesson_date: document.getElementById('lessonDate').value,
+      module: Number(document.getElementById('lessonModule').value),
+      start_time: document.getElementById('lessonStart').value,
+      end_time: document.getElementById('lessonEnd').value,
+      subject: getSelectedSubject('lessonSubjectSelect', 'lessonSubjectCustom'),
+      kind: document.getElementById('lessonKind').value,
+      teacher: document.getElementById('lessonTeacher').value.trim(),
+      url: document.getElementById('lessonUrl').value.trim()
+    };
+    try {
+      if (id) {
+        await apiFetch(`/api/schedule/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showToast('Пара обновлена');
+      } else {
+        await apiFetch('/api/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showToast('Пара добавлена');
+      }
+      closeModal('lessonModal');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function deleteLesson(id) {
+    if (!confirm('Удалить пару из расписания?')) return;
+    try {
+      await apiFetch(`/api/schedule/${id}`, { method: 'DELETE' });
+      showToast('Пара удалена');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- MATERIAL CRUD ---
+  function openMaterialModal(mid = null) {
+    STATE.pendingMatFiles = [];
+    document.getElementById('matFilesInput').value = '';
+    renderPendingFiles('mat');
+
+    const editIdEl = document.getElementById('matEditId');
+    const existingWrap = document.getElementById('matExistingFilesWrap');
+    const existingList = document.getElementById('matExistingFilesList');
+
+    if (mid) {
+      const m = STATE.materials.find(x => x.id === mid);
+      if (!m) return;
+      document.getElementById('matModalTitle').textContent = 'Редактировать материал';
+      editIdEl.value = m.id;
+      const sel = document.getElementById('matSubjectSelect');
+      if (Array.from(sel.options).some(o => o.value === m.subject)) {
+        sel.value = m.subject;
+        document.getElementById('matSubjectCustom').classList.add('hidden');
+      } else {
+        sel.value = '__custom__';
+        document.getElementById('matSubjectCustom').classList.remove('hidden');
+        document.getElementById('matSubjectCustom').value = m.subject;
+      }
+      document.getElementById('matTitle').value = m.title;
+      document.getElementById('matContent').value = m.content_text || '';
+      document.getElementById('matUrl').value = m.external_url || '';
+
+      if (m.files && m.files.length) {
+        existingWrap.classList.remove('hidden');
+        existingList.innerHTML = m.files.map(f => `
+          <div class="file-item" id="mf-row-${f.id}">
+            <span class="file-name">📎 ${esc(f.file_name)} (${formatBytes(f.file_size)})</span>
+            <button class="btn sm red" onclick="deleteMaterialFile(${m.id}, ${f.id})">✕ Удалить</button>
+          </div>
+        `).join('');
+      } else {
+        existingWrap.classList.add('hidden');
+      }
+    } else {
+      document.getElementById('matModalTitle').textContent = 'Добавить материал в базу';
+      editIdEl.value = '';
+      document.getElementById('matTitle').value = '';
+      document.getElementById('matContent').value = '';
+      document.getElementById('matUrl').value = '';
+      existingWrap.classList.add('hidden');
+    }
+    openModal('materialModal');
+  }
+
+  async function deleteMaterialFile(mid, fid) {
+    if (!confirm('Удалить файл?')) return;
+    try {
+      await apiFetch(`/api/materials/${mid}/files/${fid}`, { method: 'DELETE' });
+      const row = document.getElementById(`mf-row-${fid}`);
+      if (row) row.remove();
+      showToast('Файл удалён');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function saveMaterial() {
+    const id = document.getElementById('matEditId').value;
+    const subject = getSelectedSubject('matSubjectSelect', 'matSubjectCustom') || 'Общее / Организационное';
+    const title = document.getElementById('matTitle').value.trim();
+    const content_text = document.getElementById('matContent').value;
+    const external_url = document.getElementById('matUrl').value.trim();
+
+    if (!title) {
+      showToast('Введите заголовок!', 3000);
+      return;
+    }
+    const btn = document.getElementById('matSaveBtn');
+    btn.disabled = true;
+    try {
+      if (!id) {
+        const fd = new FormData();
+        fd.append('subject', subject);
+        fd.append('title', title);
+        fd.append('content_text', content_text);
+        fd.append('external_url', external_url);
+        STATE.pendingMatFiles.forEach(f => fd.append('files', f));
+        await apiFetch('/api/materials', { method: 'POST', body: fd });
+        showToast('Материал добавлен!');
+      } else {
+        await apiFetch(`/api/materials/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject, title, content_text, external_url })
+        });
+        if (STATE.pendingMatFiles.length > 0) {
+          const fd = new FormData();
+          STATE.pendingMatFiles.forEach(f => fd.append('files', f));
+          await apiFetch(`/api/materials/${id}/files`, { method: 'POST', body: fd });
+        }
+        showToast('Материал обновлён!');
+      }
+      closeModal('materialModal');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteMaterial(id) {
+    if (!confirm('Удалить этот материал и все прикреплённые файлы?')) return;
+    try {
+      await apiFetch(`/api/materials/${id}`, { method: 'DELETE' });
+      showToast('Удалено');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  // --- ADMIN CSV & TOOLS ---
+  async function previewCsv() {
+    const file = document.getElementById('csvFileInput').files[0];
+    const csvText = document.getElementById('csvTextInput').value;
+    const defMod = document.getElementById('csvDefaultModule').value;
+
+    let res;
+    try {
+      if (file) {
+        const fd = new FormData();
+        fd.append('module', defMod);
+        fd.append('files', file);
+        res = await apiFetch('/api/schedule/preview-csv', { method: 'POST', body: fd });
+      } else {
+        res = await apiFetch('/api/schedule/preview-csv', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ module: defMod, csv_text: csvText })
+        });
+      }
+      STATE.csvPreviewLessons = res.lessons || [];
+      document.getElementById('csvPreviewBox').classList.remove('hidden');
+      document.getElementById('csvPreviewStats').textContent =
+        `Найдено пар: ${res.total} (новых: ${res.new_count}, совпадений: ${res.existing_count})`;
+      document.getElementById('csvPreviewList').innerHTML = STATE.csvPreviewLessons.slice(0, 60).map(l =>
+        `<div style="padding:3px 0; border-bottom:1px solid var(--border);">${esc(l.lesson_date)} ${esc(l.start_time)}-${esc(l.end_time)} • <b>${esc(l.subject)}</b> (${esc(l.kind)})</div>`
+      ).join('') + (STATE.csvPreviewLessons.length > 60 ? `<div class="muted-text">...и ещё ${STATE.csvPreviewLessons.length - 60} пар</div>` : '');
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function confirmCsvImport() {
+    if (!STATE.csvPreviewLessons.length) return;
+    const mode = document.getElementById('csvImportMode').value;
+    const target_module = Number(document.getElementById('csvDefaultModule').value);
+    try {
+      const res = await apiFetch('/api/schedule/import-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lessons: STATE.csvPreviewLessons, mode, target_module })
+      });
+      showToast(`Готово! Добавлено: ${res.inserted}, обновлено: ${res.updated}`, 4000);
+      document.getElementById('csvPreviewBox').classList.add('hidden');
+      await loadBootstrap();
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function sendBroadcast() {
+    const text = document.getElementById('broadcastText').value.trim();
+    const pin = document.getElementById('broadcastPin').checked;
+    if (!text) return showToast('Введите текст объявления');
+    try {
+      await apiFetch('/api/admin/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, pin })
+      });
+      document.getElementById('broadcastText').value = '';
+      showToast('Объявление отправлено в канал!');
+    } catch (e) {
+      showToast(e.message, 4000);
+    }
+  }
+
+  async function refreshPinnedPost() {
+    try {
+      await apiFetch('/api/admin/refresh-pin', { method: 'POST' });
+      showToast('Закреплённый пост обновлён!');
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  async function savePasswords() {
+    const student_password = document.getElementById('studentPasswordInput').value.trim();
+    const admin_password = document.getElementById('adminPasswordInput').value.trim();
+    try {
+      await apiFetch('/api/admin/passwords', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_password, admin_password })
+      });
+      document.getElementById('adminPasswordInput').value = '';
+      showToast('Пароли сохранены!');
+    } catch (e) {
+      showToast(e.message, 3500);
+    }
+  }
+
+  initApp();
+</script>
+</body>
+</html>
